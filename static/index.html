@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentBridge Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Multi-Agent Coordinator</p>
+        <h1>AgentBridge</h1>
+      </div>
+      <div id="connection-status" class="connection status-offline">disconnected</div>
+    </header>
+
+    <section class="panel composer">
+      <div class="panel-header">
+        <h2>Send</h2>
+      </div>
+      <form id="composer-form" class="composer-grid">
+        <select id="send-mode">
+          <option value="message">Message</option>
+          <option value="task">New Task</option>
+        </select>
+        <select id="target-agent"></select>
+        <input id="task-title" type="text" placeholder="Task title">
+        <select id="review-agent"></select>
+        <input id="depends-on" type="text" placeholder="Depends on task IDs (comma separated)">
+        <textarea id="composer-input" rows="3" placeholder="Message or task description"></textarea>
+        <button type="submit">Send</button>
+      </form>
+    </section>
+
+    <main class="layout">
+      <aside class="panel agents-panel">
+        <div class="panel-header">
+          <h2>Agents</h2>
+        </div>
+        <div id="agents-list" class="card-list"></div>
+      </aside>
+
+      <section class="panel timeline-panel">
+        <div class="panel-header timeline-header">
+          <div>
+            <h2>Messages</h2>
+            <p class="muted">Last 500 rendered</p>
+          </div>
+          <div class="panel-actions">
+            <button id="clear-messages" type="button" class="secondary-button">Clear Messages</button>
+          </div>
+          <div class="filters">
+            <input id="search-input" type="search" placeholder="Search messages">
+            <select id="agent-filter">
+              <option value="">All agents</option>
+            </select>
+          </div>
+        </div>
+        <div id="message-types" class="chips"></div>
+        <div id="message-list" class="timeline"></div>
+      </section>
+
+      <aside class="panel tasks-panel">
+        <div class="panel-header">
+          <h2>Tasks</h2>
+          <button id="clear-tasks" type="button" class="secondary-button">Clear Finished</button>
+        </div>
+        <div id="tasks-list" class="task-groups"></div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

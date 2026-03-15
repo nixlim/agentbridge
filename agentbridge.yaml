@@ -1,0 +1,28 @@
+server:
+  host: "127.0.0.1"
+  port: 9939
+
+workspace:
+  path: "./workspace"
+  init_git: true
+
+agents:
+  claude:
+    command: "claude"
+    args: ["--dangerously-skip-permissions", "--output-format", "json", "--verbose"]
+    timeout_seconds: 300
+    max_retries: 2
+    working_dir: ""
+    env:
+      CLAUDE_CODE_MAX_TURNS: "50"
+  codex:
+    command: "codex"
+    args: ["exec", "--full-auto"]
+    timeout_seconds: 300
+    max_retries: 2
+    working_dir: ""
+    env: {}
+
+log:
+  file: "./agentbridge.log"
+  level: "info"
