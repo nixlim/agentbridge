@@ -6,7 +6,17 @@ workspace:
   path: "./workspace"
   init_git: true
 
-agents:
+brain:
+  provider: "claude"
+  command: "claude"
+  args: ["-p", "--output-format", "json", "--verbose"]
+  timeout_seconds: 300
+  model_hint: ""
+  system_prompt_file: "./brain_system_prompt.md"
+  max_context_messages: 50
+  planning_style: "deterministic"
+
+providers:
   claude:
     command: "claude"
     args: ["--dangerously-skip-permissions", "--output-format", "json", "--verbose"]
@@ -15,6 +25,7 @@ agents:
     working_dir: ""
     env:
       CLAUDE_CODE_MAX_TURNS: "50"
+
   codex:
     command: "codex"
     args: ["exec", "--full-auto"]
@@ -22,6 +33,19 @@ agents:
     max_retries: 2
     working_dir: ""
     env: {}
+
+team:
+  - name: "spec-creator-claude"
+    provider: "claude"
+    role: "spec_creator"
+    count: 3
+    description: "Creates and refines technical specifications, implementation plans, acceptance criteria, and task breakdowns."
+
+  - name: "reviewer-codex"
+    provider: "codex"
+    role: "reviewer"
+    count: 2
+    description: "Reviews specifications for clarity, consistency, missing edge cases, feasibility, and testability."
 
 log:
   file: "./agentbridge.log"

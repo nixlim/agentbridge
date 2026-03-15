@@ -3,72 +3,189 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AgentBridge Dashboard</title>
+  <title>AgentBridge v2</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div class="shell">
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">Multi-Agent Coordinator</p>
-        <h1>AgentBridge</h1>
+    <header class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">LLM-Brained Team Coordination</p>
+        <h1>AgentBridge v2</h1>
+        <p class="hero-text">Goals, plans, agents, and the coordinator brain in one control surface.</p>
+        <p id="workspace-path" class="workspace-path">Workspace: unknown</p>
       </div>
-      <div id="connection-status" class="connection status-offline">disconnected</div>
+      <div class="hero-status">
+        <div id="connection-status" class="connection status-offline">disconnected</div>
+        <div class="hero-chip">
+          <span>Brain</span>
+          <strong id="brain-provider-label">unknown</strong>
+        </div>
+      </div>
     </header>
 
-    <section class="panel composer">
-      <div class="panel-header">
-        <h2>Send</h2>
+    <section class="goalbar panel">
+      <div class="goalbar-main">
+        <div>
+          <p class="eyebrow">Current Goal</p>
+          <h2 id="goal-title">No active goal</h2>
+          <p id="goal-status" class="muted">Submit a goal to start planning.</p>
+        </div>
+        <div class="goalbar-progress">
+          <div class="progress-head">
+            <span id="goal-progress-label">0 / 0 tasks</span>
+            <span id="goal-summary" class="muted"></span>
+          </div>
+          <div class="progress-track">
+            <div id="goal-progress-bar" class="progress-bar"></div>
+          </div>
+        </div>
       </div>
-      <form id="composer-form" class="composer-grid">
-        <select id="send-mode">
-          <option value="message">Message</option>
-          <option value="task">New Task</option>
-        </select>
-        <select id="target-agent"></select>
-        <input id="task-title" type="text" placeholder="Task title">
-        <select id="review-agent"></select>
-        <input id="depends-on" type="text" placeholder="Depends on task IDs (comma separated)">
-        <textarea id="composer-input" rows="3" placeholder="Message or task description"></textarea>
-        <button type="submit">Send</button>
-      </form>
+      <div class="goalbar-actions">
+        <button id="kill-goal" type="button" class="danger-button">Kill Goal</button>
+        <button id="force-replan" type="button">Force Re-plan</button>
+      </div>
     </section>
 
     <main class="layout">
-      <aside class="panel agents-panel">
-        <div class="panel-header">
-          <h2>Agents</h2>
-        </div>
-        <div id="agents-list" class="card-list"></div>
-      </aside>
+      <section class="stack">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">New Goal</p>
+              <h2>Executive Input</h2>
+            </div>
+          </div>
+          <form id="goal-form" class="form-grid">
+            <input id="goal-input-title" type="text" placeholder="Goal title">
+            <textarea id="goal-input-description" rows="4" placeholder="High-level outcome, constraints, or guidance"></textarea>
+            <button type="submit">Submit Goal</button>
+          </form>
+        </section>
 
-      <section class="panel timeline-panel">
-        <div class="panel-header timeline-header">
-          <div>
-            <h2>Messages</h2>
-            <p class="muted">Last 500 rendered</p>
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Manual Actions</p>
+              <h2>Overrides</h2>
+            </div>
           </div>
-          <div class="panel-actions">
-            <button id="clear-messages" type="button" class="secondary-button">Clear Messages</button>
-          </div>
-          <div class="filters">
-            <input id="search-input" type="search" placeholder="Search messages">
+          <form id="composer-form" class="form-grid">
+            <select id="send-mode">
+              <option value="brain">Message Brain</option>
+              <option value="message">Message Agent</option>
+              <option value="task">Create Task</option>
+            </select>
+            <select id="target-agent"></select>
+            <input id="task-title" type="text" placeholder="Task title">
+            <select id="review-agent"></select>
+            <input id="depends-on" type="text" placeholder="Depends on task IDs (comma separated)">
+            <textarea id="composer-input" rows="4" placeholder="Message or task description"></textarea>
+            <button type="submit">Send</button>
+          </form>
+          <div id="human-input-panel" class="callout hidden"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Team</p>
+              <h2>Agents</h2>
+            </div>
             <select id="agent-filter">
               <option value="">All agents</option>
             </select>
           </div>
-        </div>
-        <div id="message-types" class="chips"></div>
-        <div id="message-list" class="timeline"></div>
+          <div id="agents-list" class="card-list"></div>
+        </section>
       </section>
 
-      <aside class="panel tasks-panel">
-        <div class="panel-header">
-          <h2>Tasks</h2>
-          <button id="clear-tasks" type="button" class="secondary-button">Clear Finished</button>
-        </div>
-        <div id="tasks-list" class="task-groups"></div>
-      </aside>
+      <section class="stack wide">
+        <section class="panel brain-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Coordinator Brain</p>
+              <h2>Thinking</h2>
+            </div>
+            <div class="inline-actions">
+              <select id="brain-provider-select"></select>
+              <button id="switch-brain" type="button">Switch Brain</button>
+            </div>
+          </div>
+          <div class="brain-grid">
+            <article class="brain-callout">
+              <div class="brain-meta">
+                <span id="brain-trigger" class="badge">no trigger</span>
+                <span id="brain-invocations" class="muted">0 invocations</span>
+              </div>
+              <p id="workflow-status" class="muted">No active workflow state.</p>
+              <p id="brain-process" class="muted">No brain process telemetry yet.</p>
+              <pre id="brain-thinking">No brain output yet.</pre>
+            </article>
+            <article class="brain-card">
+              <h3>Last Decisions</h3>
+              <div id="brain-decisions" class="decision-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Execution Plan</p>
+              <h2>Phases</h2>
+            </div>
+            <button id="toggle-plan-editor" type="button" class="secondary-button">Edit Plan</button>
+          </div>
+          <div id="plan-editor" class="hidden">
+            <form id="plan-form" class="form-grid">
+              <textarea id="plan-input" rows="10" placeholder='{"phases":[...]}'></textarea>
+              <button type="submit">Apply Plan Override</button>
+            </form>
+          </div>
+          <div id="plan-view" class="plan-grid"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Timeline</p>
+              <h2>Messages</h2>
+            </div>
+            <div class="inline-actions">
+              <input id="search-input" type="search" placeholder="Search messages">
+              <button id="clear-messages" type="button" class="secondary-button">Clear Messages</button>
+            </div>
+          </div>
+          <div id="message-types" class="chips"></div>
+          <div id="message-list" class="timeline"></div>
+        </section>
+      </section>
+
+      <section class="stack">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Workspace</p>
+              <h2>File Tree</h2>
+            </div>
+            <button id="refresh-workspace" type="button" class="secondary-button">Refresh</button>
+          </div>
+          <div id="workspace-tree" class="workspace-tree"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Work Queue</p>
+              <h2>Tasks</h2>
+            </div>
+            <button id="clear-tasks" type="button" class="secondary-button">Clear Finished</button>
+          </div>
+          <div id="tasks-list" class="task-groups"></div>
+        </section>
+      </section>
     </main>
   </div>
 

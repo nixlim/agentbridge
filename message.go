@@ -43,6 +43,8 @@ type Metadata struct {
 	CommitHash   string      `json:"commit_hash,omitempty"`
 	Task         *Task       `json:"task,omitempty"`
 	Agent        *AgentState `json:"agent,omitempty"`
+	Goal         *Goal       `json:"goal,omitempty"`
+	Plan         *Plan       `json:"plan,omitempty"`
 	RawOutput    string      `json:"raw_output,omitempty"`
 }
 

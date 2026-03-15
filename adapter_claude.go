@@ -1,16 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
-	"os/exec"
 	"strings"
-	"syscall"
-	"time"
 )
 
 type ClaudeAdapter struct {
@@ -29,61 +23,32 @@ func (a *ClaudeAdapter) IsAvailable() bool {
 }
 
 func (a *ClaudeAdapter) Execute(ctx context.Context, prompt string, workDir string) (*AgentResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(a.config.TimeoutSeconds)*time.Second)
-	defer cancel()
-
 	args := append([]string{}, a.config.Args...)
 	args = ensureArg(args, "--dangerously-skip-permissions")
 	args = append([]string{"-p", prompt}, args...)
-	cmd := exec.CommandContext(ctx, a.config.Command, args...)
-	cmd.Dir = chooseWorkDir(workDir, a.config.WorkingDir, a.workspacePath)
-	cmd.Env = append(os.Environ(), flattenEnv(a.config.Env)...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	start := time.Now()
-	err := cmd.Run()
-	duration := time.Since(start)
-	if ctx.Err() == context.DeadlineExceeded {
-		return nil, fmt.Errorf("timeout after %ds", a.config.TimeoutSeconds)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-
-	result, parseErr := a.ParseOutput(stdout.Bytes())
-	if parseErr != nil {
-		return &AgentResult{
-			RawOutput:  stdout.String(),
-			Summary:    strings.TrimSpace(stdout.String()),
-			DurationMs: duration.Milliseconds(),
-		}, nil
-	}
-	result.DurationMs = duration.Milliseconds()
-	return result, nil
+	return executeAdapterCommand(ctx, a.config, a.workspacePath, workDir, args, a.ParseOutput)
 }
 
 func (a *ClaudeAdapter) ParseOutput(raw []byte) (*AgentResult, error) {
 	type payload struct {
-		Result     string  `json:"result"`
-		CostUSD    float64 `json:"cost_usd"`
-		DurationMS int64   `json:"duration_ms"`
-		NumTurns   int     `json:"num_turns"`
-		IsError    bool    `json:"is_error"`
-		Error      string  `json:"error"`
+		Result           string          `json:"result"`
+		StructuredOutput json.RawMessage `json:"structured_output"`
+		CostUSD          float64         `json:"cost_usd"`
+		DurationMS       int64           `json:"duration_ms"`
+		NumTurns         int             `json:"num_turns"`
+		IsError          bool            `json:"is_error"`
+		Error            string          `json:"error"`
 	}
 
 	var data payload
 	if err := json.Unmarshal(raw, &data); err != nil {
 		type event struct {
-			Type       string `json:"type"`
-			Subtype    string `json:"subtype"`
-			Result     string `json:"result"`
-			IsError    bool   `json:"is_error"`
-			DurationMS int64  `json:"duration_ms"`
+			Type             string          `json:"type"`
+			Subtype          string          `json:"subtype"`
+			Result           string          `json:"result"`
+			StructuredOutput json.RawMessage `json:"structured_output"`
+			IsError          bool            `json:"is_error"`
+			DurationMS       int64           `json:"duration_ms"`
 		}
 
 		var events []event
@@ -97,7 +62,7 @@ func (a *ClaudeAdapter) ParseOutput(raw []byte) (*AgentResult, error) {
 				}
 				return &AgentResult{
 					RawOutput:  strings.TrimSpace(string(raw)),
-					Summary:    strings.TrimSpace(events[i].Result),
+					Summary:    claudeSummary(events[i].StructuredOutput, events[i].Result),
 					DurationMs: events[i].DurationMS,
 				}, nil
 			}
@@ -109,7 +74,14 @@ func (a *ClaudeAdapter) ParseOutput(raw []byte) (*AgentResult, error) {
 	}
 	return &AgentResult{
 		RawOutput:  strings.TrimSpace(string(raw)),
-		Summary:    strings.TrimSpace(data.Result),
+		Summary:    claudeSummary(data.StructuredOutput, data.Result),
 		DurationMs: data.DurationMS,
 	}, nil
+}
+
+func claudeSummary(structuredOutput json.RawMessage, result string) string {
+	if trimmed := strings.TrimSpace(string(structuredOutput)); trimmed != "" && trimmed != "null" {
+		return trimmed
+	}
+	return strings.TrimSpace(result)
 }
