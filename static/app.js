@@ -432,11 +432,14 @@ function formatWorkflowMeta(workflow) {
   if (workflow.recipe) parts.push(workflow.recipe);
   if (workflow.review_round) {
     const rounds = workflow.max_review_rounds
-      ? `review round ${workflow.review_round}/${workflow.max_review_rounds}`
-      : `review round ${workflow.review_round}`;
+      ? `active review round ${workflow.review_round}/${workflow.max_review_rounds}`
+      : `active review round ${workflow.review_round}`;
     parts.push(rounds);
   } else if (workflow.max_review_rounds) {
-    parts.push(`max review rounds ${workflow.max_review_rounds}`);
+    parts.push(`active review round 0/${workflow.max_review_rounds}`);
+  }
+  if (workflow.completed_review_rounds) {
+    parts.push(`completed rounds ${workflow.completed_review_rounds}`);
   }
   return parts.join(" • ");
 }
@@ -445,7 +448,13 @@ function formatWorkflowStatus(workflow) {
   if (!workflow || !workflow.mode) return "No active workflow state.";
   const parts = [workflow.status || "idle"];
   if (workflow.stage) parts.push(workflow.stage.replaceAll("_", " "));
-  if (workflow.current_phase_number) {
+  if (workflow.recipe === "spec-review-loop" && workflow.stage_task_total) {
+    if (workflow.stage === "adversarial_review") {
+      parts.push(`reviewers ${workflow.stage_task_completed || 0}/${workflow.stage_task_total} complete`);
+    } else {
+      parts.push(`tasks ${workflow.stage_task_completed || 0}/${workflow.stage_task_total} complete`);
+    }
+  } else if (workflow.current_phase_number) {
     const phaseLabel = workflow.total_phases
       ? `phase ${workflow.current_phase_number}/${workflow.total_phases}`
       : `phase ${workflow.current_phase_number}`;

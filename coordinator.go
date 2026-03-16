@@ -2140,8 +2140,10 @@ func (c *Coordinator) workflowStateLocked() WorkflowState {
 	state.CurrentPhaseTitle = phase.Title
 	state.Stage = c.workflowStageForPhase(phase)
 	state.StageDetail = phase.Description
-	state.ReviewRound = c.extractReviewRound(phase.Title)
+	state.ReviewRound = c.activeReviewRoundLocked(phaseIndex)
+	state.CompletedReviewRounds = c.completedReviewRoundsLocked()
 	state.MaxReviewRounds = c.goalReviewRoundsLocked(goal)
+	state.StageTaskCompleted, state.StageTaskTotal = c.phaseTaskProgressLocked(phase)
 	if goal.Summary != "" && (goal.Status == GoalBlocked || goal.Status == GoalFailed) {
 		state.LastError = goal.Summary
 	}
@@ -2155,6 +2157,60 @@ func (c *Coordinator) workflowStateLocked() WorkflowState {
 	}
 
 	return state
+}
+
+func (c *Coordinator) activeReviewRoundLocked(phaseIndex int) int {
+	if c.brainState.CurrentPlan == nil || phaseIndex < 0 || phaseIndex >= len(c.brainState.CurrentPlan.Phases) {
+		return 0
+	}
+	phase := c.brainState.CurrentPlan.Phases[phaseIndex]
+	if round := c.extractReviewRound(phase.Title); round > 0 {
+		return round
+	}
+	round := 0
+	for i := 0; i <= phaseIndex && i < len(c.brainState.CurrentPlan.Phases); i++ {
+		if next := c.extractReviewRound(c.brainState.CurrentPlan.Phases[i].Title); next > round {
+			round = next
+		}
+	}
+	return round
+}
+
+func (c *Coordinator) completedReviewRoundsLocked() int {
+	if c.brainState.CurrentPlan == nil {
+		return 0
+	}
+	completed := 0
+	for idx, phase := range c.brainState.CurrentPlan.Phases {
+		if c.workflowStageForPhase(phase) != "adversarial_review" {
+			continue
+		}
+		if !c.phaseTasksCompleteLocked(idx) {
+			continue
+		}
+		if round := c.extractReviewRound(phase.Title); round > completed {
+			completed = round
+		}
+	}
+	return completed
+}
+
+func (c *Coordinator) phaseTaskProgressLocked(phase Phase) (int, int) {
+	total := len(phase.Tasks)
+	if total == 0 {
+		return 0, 0
+	}
+	completed := 0
+	for _, planned := range phase.Tasks {
+		if planned.RealTaskID == "" {
+			continue
+		}
+		task := c.tasks[planned.RealTaskID]
+		if task != nil && task.Status == TaskCompleted {
+			completed++
+		}
+	}
+	return completed, total
 }
 
 func (c *Coordinator) phaseTasksCompleteLocked(phaseIndex int) bool {

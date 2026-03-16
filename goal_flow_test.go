@@ -732,6 +732,85 @@ func TestSpecWorkflowHonorsGoalReviewRoundOverride(t *testing.T) {
 	}
 }
 
+func TestSpecWorkflowReportsReviewCycleProgress(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+	cfg.Workflow.DefaultReviewRounds = 6
+	cfg.Team = []TeamMemberConfig{
+		{
+			Name:        "spec-creator-claude",
+			Provider:    "claude",
+			Role:        "spec_creator",
+			Count:       1,
+			Description: "Creates specifications",
+		},
+		{
+			Name:        "reviewer-codex",
+			Provider:    "codex",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications",
+		},
+		{
+			Name:        "reviewer-claude",
+			Provider:    "claude",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications",
+		},
+	}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"spec-creator-claude": &scriptedAgent{name: "spec-creator-claude", responses: []string{"created spec"}, delay: 20 * time.Millisecond, available: true},
+		"reviewer-codex":      &scriptedAgent{name: "reviewer-codex", responses: []string{"VERDICT: PASS\n\nLooks good."}, delay: 200 * time.Millisecond, available: true},
+		"reviewer-claude":     &scriptedAgent{name: "reviewer-claude", responses: []string{"VERDICT: PASS\n\nLooks good."}, delay: 200 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	if _, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:       "B3 spec",
+		Description: "Prepare and review a technical specification",
+	}); err != nil {
+		t.Fatalf("SubmitGoal() error = %v", err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		snapshot := coordinator.Snapshot()
+		workflow, ok := snapshot["workflow"].(WorkflowState)
+		return ok && workflow.Stage == "adversarial_review" && workflow.StageTaskTotal == 2
+	})
+
+	snapshot := coordinator.Snapshot()
+	workflow, ok := snapshot["workflow"].(WorkflowState)
+	if !ok {
+		t.Fatalf("snapshot workflow type = %T, want WorkflowState", snapshot["workflow"])
+	}
+	if workflow.ReviewRound != 1 {
+		t.Fatalf("workflow review round = %d, want 1", workflow.ReviewRound)
+	}
+	if workflow.CompletedReviewRounds != 0 {
+		t.Fatalf("completed review rounds = %d, want 0", workflow.CompletedReviewRounds)
+	}
+	if workflow.StageTaskTotal != 2 {
+		t.Fatalf("stage task total = %d, want 2", workflow.StageTaskTotal)
+	}
+}
+
 func TestPlannerErrorDoesNotFailActiveDeterministicGoal(t *testing.T) {
 	cfg := newGoalTestConfig(t.TempDir())
 
