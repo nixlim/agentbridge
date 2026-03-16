@@ -17,11 +17,16 @@ type Plan struct {
 
 type WorkflowState struct {
 	Mode               string `json:"mode"`
-	PlannerMode        string `json:"planner_mode"`
+	Recipe             string `json:"recipe,omitempty"`
 	Status             string `json:"status"`
+	Stage              string `json:"stage,omitempty"`
+	StageDetail        string `json:"stage_detail,omitempty"`
 	CurrentPhaseNumber int    `json:"current_phase_number,omitempty"`
 	CurrentPhaseTitle  string `json:"current_phase_title,omitempty"`
 	TotalPhases        int    `json:"total_phases,omitempty"`
+	ReviewRound        int    `json:"review_round,omitempty"`
+	MaxReviewRounds    int    `json:"max_review_rounds,omitempty"`
+	LastError          string `json:"last_error,omitempty"`
 }
 
 type Phase struct {

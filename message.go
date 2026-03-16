@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -87,11 +88,18 @@ func (s *MessageStore) RecoverMessages() ([]*Message, error) {
 		return nil, fmt.Errorf("seek log file: %w", err)
 	}
 
-	scanner := bufio.NewScanner(s.file)
+	reader := bufio.NewReader(s.file)
 	messages := make([]*Message, 0)
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("read log file: %w", err)
+		}
+		line = trimTrailingNewline(line)
 		if len(line) == 0 {
+			if err == io.EOF {
+				break
+			}
 			continue
 		}
 		var msg Message
@@ -99,9 +107,9 @@ func (s *MessageStore) RecoverMessages() ([]*Message, error) {
 			return nil, fmt.Errorf("unmarshal log entry: %w", err)
 		}
 		messages = append(messages, &msg)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan log file: %w", err)
+		if err == io.EOF {
+			break
+		}
 	}
 
 	return messages, nil
@@ -165,4 +173,17 @@ func filepathDir(path string) string {
 		}
 	}
 	return "."
+}
+
+func trimTrailingNewline(line []byte) []byte {
+	if len(line) == 0 {
+		return line
+	}
+	if line[len(line)-1] == '\n' {
+		line = line[:len(line)-1]
+	}
+	if len(line) > 0 && line[len(line)-1] == '\r' {
+		line = line[:len(line)-1]
+	}
+	return line
 }

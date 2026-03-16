@@ -14,6 +14,39 @@ import (
 
 const processGroupKillGrace = 2 * time.Second
 
+type CommandExecutionError struct {
+	Cause    error
+	Stdout   string
+	Stderr   string
+	ExitCode int
+}
+
+func (e *CommandExecutionError) Error() string {
+	if e == nil {
+		return ""
+	}
+	base := ""
+	if e.Cause != nil {
+		base = e.Cause.Error()
+	}
+	detail := strings.TrimSpace(strings.Join([]string{strings.TrimSpace(e.Stdout), strings.TrimSpace(e.Stderr)}, "\n"))
+	switch {
+	case base != "" && detail != "":
+		return fmt.Sprintf("%s: %s", base, detail)
+	case base != "":
+		return base
+	default:
+		return detail
+	}
+}
+
+func (e *CommandExecutionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
 func executeAdapterCommand(ctx context.Context, config AgentConfig, workspacePath, workDir string, args []string, parse func([]byte) (*AgentResult, error)) (*AgentResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(config.TimeoutSeconds)*time.Second)
 	defer cancel()
@@ -54,10 +87,16 @@ func executeAdapterCommand(ctx context.Context, config AgentConfig, workspacePat
 	case <-ctx.Done():
 		err = stopProcessGroup(cmd, waitCh)
 		if ctx.Err() == context.DeadlineExceeded {
-			if observer != nil {
-				observer.Finish("timed_out", exitCodeFromError(err), fmt.Errorf("timeout after %ds", config.TimeoutSeconds), time.Since(start))
+			timeoutErr := &CommandExecutionError{
+				Cause:    fmt.Errorf("timeout after %ds", config.TimeoutSeconds),
+				Stdout:   stdout.String(),
+				Stderr:   stderr.String(),
+				ExitCode: exitCodeFromError(err),
 			}
-			return nil, fmt.Errorf("timeout after %ds", config.TimeoutSeconds)
+			if observer != nil {
+				observer.Finish("timed_out", timeoutErr.ExitCode, timeoutErr, time.Since(start))
+			}
+			return nil, timeoutErr
 		}
 		if observer != nil {
 			observer.Finish("cancelled", exitCodeFromError(err), ctx.Err(), time.Since(start))
@@ -74,10 +113,16 @@ func executeAdapterCommand(ctx context.Context, config AgentConfig, workspacePat
 		return nil, fmt.Errorf("timeout after %ds", config.TimeoutSeconds)
 	}
 	if err != nil {
-		if observer != nil {
-			observer.Finish("failed", exitCode, err, duration)
+		commandErr := &CommandExecutionError{
+			Cause:    err,
+			Stdout:   stdout.String(),
+			Stderr:   stderr.String(),
+			ExitCode: exitCode,
 		}
-		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		if observer != nil {
+			observer.Finish("failed", exitCode, commandErr, duration)
+		}
+		return nil, commandErr
 	}
 	if observer != nil {
 		observer.Finish("succeeded", exitCode, nil, duration)

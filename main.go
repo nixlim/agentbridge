@@ -36,12 +36,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("instantiate team agents: %v", err)
 	}
-	brainAdapter, err := instantiateBrainAdapter(cfg, workspace.Path())
-	if err != nil {
-		log.Fatalf("instantiate brain adapter: %v", err)
-	}
 
-	coordinator := NewCoordinator(cfg, agents, brainAdapter, workspace, logStore, hub)
+	coordinator := NewCoordinator(cfg, agents, nil, workspace, logStore, hub)
 	if err := coordinator.RecoverFromLog(); err != nil {
 		log.Fatalf("recover from log: %v", err)
 	}

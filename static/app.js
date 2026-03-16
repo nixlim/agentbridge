@@ -4,7 +4,6 @@ const state = {
   goals: [],
   currentGoal: null,
   plan: null,
-  brain: {},
   workflow: {},
   workspace: {},
   workspaceFiles: [],
@@ -12,28 +11,25 @@ const state = {
   search: "",
   agentFilter: "",
   messageTypeFilter: new Set(),
-  lastBrainDecisions: [],
-  humanInputRequest: null,
 };
 
 const refs = {
-  connection: document.getElementById("connection-status"),
+  connectionDot: document.getElementById("connection-dot"),
+  connectionLabel: document.getElementById("connection-label"),
   brainProviderLabel: document.getElementById("brain-provider-label"),
   workspacePath: document.getElementById("workspace-path"),
   refreshWorkspace: document.getElementById("refresh-workspace"),
   workspaceTree: document.getElementById("workspace-tree"),
-  brainProviderSelect: document.getElementById("brain-provider-select"),
-  switchBrain: document.getElementById("switch-brain"),
-  forceReplan: document.getElementById("force-replan"),
   killGoal: document.getElementById("kill-goal"),
+  goalbar: document.getElementById("goalbar"),
   goalTitle: document.getElementById("goal-title"),
   goalStatus: document.getElementById("goal-status"),
-  goalSummary: document.getElementById("goal-summary"),
   goalProgressLabel: document.getElementById("goal-progress-label"),
   goalProgressBar: document.getElementById("goal-progress-bar"),
   goalForm: document.getElementById("goal-form"),
   goalInputTitle: document.getElementById("goal-input-title"),
   goalInputDescription: document.getElementById("goal-input-description"),
+  goalInputReviewRounds: document.getElementById("goal-input-review-rounds"),
   composerForm: document.getElementById("composer-form"),
   sendMode: document.getElementById("send-mode"),
   targetAgent: document.getElementById("target-agent"),
@@ -61,6 +57,7 @@ const refs = {
   planForm: document.getElementById("plan-form"),
   planInput: document.getElementById("plan-input"),
   humanInputPanel: document.getElementById("human-input-panel"),
+  tabTasksCount: document.getElementById("tab-tasks-count"),
 };
 
 const messageTypes = [
@@ -72,12 +69,25 @@ const messageTypes = [
   "system",
 ];
 
-const brainProviders = ["claude", "codex"];
-
 let socket;
 let reconnectDelay = 1000;
 
+function initTabs() {
+  const tabs = document.querySelectorAll(".tab[data-tab]");
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      tabs.forEach((entry) => entry.classList.remove("active"));
+      tab.classList.add("active");
+      document.querySelectorAll(".tab-panel[data-tab]").forEach((panel) => {
+        panel.classList.toggle("active", panel.dataset.tab === tab.dataset.tab);
+      });
+    });
+  });
+}
+
 function init() {
+  initTabs();
+
   messageTypes.forEach((type) => {
     const chip = document.createElement("button");
     chip.className = "chip active";
@@ -97,25 +107,17 @@ function init() {
     refs.messageTypes.appendChild(chip);
   });
 
-  brainProviders.forEach((provider) => {
-    appendOption(refs.brainProviderSelect, provider, provider);
-  });
-
   refs.searchInput.addEventListener("input", (event) => {
     state.search = event.target.value.toLowerCase();
     renderMessages();
   });
-
   refs.agentFilter.addEventListener("change", (event) => {
     state.agentFilter = event.target.value;
     renderAgents();
     renderMessages();
   });
-
   refs.clearMessages.addEventListener("click", () => apiPost("/api/messages/clear"));
   refs.clearTasks.addEventListener("click", () => apiPost("/api/tasks/clear"));
-  refs.forceReplan.addEventListener("click", forceReplan);
-  refs.switchBrain.addEventListener("click", switchBrain);
   refs.killGoal.addEventListener("click", killGoal);
   refs.refreshWorkspace.addEventListener("click", refreshWorkspace);
   refs.goalForm.addEventListener("submit", submitGoal);
@@ -125,10 +127,12 @@ function init() {
   refs.planForm.addEventListener("submit", submitPlanOverride);
 
   toggleComposerFields();
+  renderHumanInputRequest();
   connectWebSocket();
   window.setInterval(() => {
     renderAgents();
     renderTasks();
+    renderWorkflowPanel();
   }, 1000);
 }
 
@@ -137,8 +141,8 @@ function connectWebSocket() {
   socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
 
   socket.addEventListener("open", () => {
-    refs.connection.textContent = "connected";
-    refs.connection.className = "connection status-idle";
+    refs.connectionDot.className = "topbar-dot connected";
+    refs.connectionLabel.textContent = "connected";
     reconnectDelay = 1000;
   });
 
@@ -152,68 +156,45 @@ function connectWebSocket() {
       case "message":
         state.messages.push(payload.data);
         renderMessages();
+        renderWorkflowPanel();
         break;
       case "task_update":
         upsertTask(payload.data);
         renderTasks();
         renderPlan();
+        renderGoalBar();
+        renderWorkflowPanel();
         refreshWorkspace();
         break;
       case "agent_status":
         state.agents[payload.data.name] = payload.data;
         renderAgents();
         populateAgentOptions();
+        renderWorkflowPanel();
         break;
       case "goal_update":
         upsertGoal(payload.data);
-        if (state.currentGoal && state.currentGoal.id === payload.data.id) {
-          state.currentGoal = payload.data;
-        } else if (!state.currentGoal && ["planning", "active"].includes(payload.data.status)) {
-          state.currentGoal = payload.data;
-        }
         renderGoalBar();
+        renderWorkflowPanel();
         break;
       case "plan_update":
         state.plan = payload.data;
         renderGoalBar();
         renderPlan();
-        break;
-      case "brain_thinking":
-        state.brain = {
-          ...state.brain,
-          last_thinking: payload.data.thinking,
-          last_trigger: payload.data.trigger,
-          invocation_in_flight: payload.data.invocation_in_flight ?? state.brain.invocation_in_flight,
-        };
-        renderBrainPanel();
-        break;
-      case "brain_status":
-        state.brain = {
-          ...state.brain,
-          invocation_in_flight: !["succeeded", "failed", "timed_out", "cancelled", "start_failed"].includes(payload.data.status),
-          last_invocation: payload.data,
-        };
-        renderBrainPanel();
-        break;
-      case "brain_decisions":
-        state.lastBrainDecisions = payload.data.decisions || [];
-        renderBrainPanel();
+        renderWorkflowPanel();
         break;
       case "workflow_update":
         state.workflow = payload.data || {};
+        populateAgentOptions();
         renderGoalBar();
-        renderBrainPanel();
-        break;
-      case "human_input_requested":
-        state.humanInputRequest = payload.data;
-        renderHumanInputRequest();
+        renderWorkflowPanel();
         break;
     }
   });
 
   socket.addEventListener("close", () => {
-    refs.connection.textContent = "reconnecting";
-    refs.connection.className = "connection status-busy";
+    refs.connectionDot.className = "topbar-dot reconnecting";
+    refs.connectionLabel.textContent = "reconnecting";
     window.setTimeout(connectWebSocket, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30000);
   });
@@ -225,11 +206,10 @@ function hydrateState(data) {
   state.goals = data.goals || [];
   state.currentGoal = data.current_goal || null;
   state.plan = data.plan || null;
-  state.brain = data.brain || {};
   state.workflow = data.workflow || {};
   state.workspace = data.workspace || {};
   state.messages = data.messages || [];
-  state.humanInputRequest = state.brain.pending_human_input || null;
+  state.workspaceFiles = [];
 }
 
 function renderAll() {
@@ -237,7 +217,7 @@ function renderAll() {
   toggleComposerFields();
   renderGoalBar();
   renderHumanInputRequest();
-  renderBrainPanel();
+  renderWorkflowPanel();
   renderPlan();
   renderAgents();
   renderTasks();
@@ -255,7 +235,7 @@ function populateAgentOptions() {
       appendOption(select, "", "All agents");
     } else if (index === 1) {
       appendOption(select, "", "Select agent");
-    } else if (index === 2) {
+    } else {
       appendOption(select, "", "No reviewer");
     }
     names.forEach((name) => appendOption(select, name, name));
@@ -264,9 +244,8 @@ function populateAgentOptions() {
     }
   });
 
-  const provider = state.brain.active_provider || state.brainProvider || state.brain.provider || "claude";
-  refs.brainProviderLabel.textContent = provider;
-  refs.brainProviderSelect.value = provider;
+  const label = state.workflow.recipe || state.workflow.mode || "deterministic";
+  refs.brainProviderLabel.textContent = label;
 }
 
 function appendOption(select, value, label) {
@@ -279,36 +258,49 @@ function appendOption(select, value, label) {
 function renderGoalBar() {
   const goal = state.currentGoal;
   if (!goal) {
+    refs.goalbar.classList.add("empty");
     refs.goalTitle.textContent = "No active goal";
-    refs.goalStatus.textContent = "Submit a goal to start planning.";
-    refs.goalSummary.textContent = "";
-    refs.goalProgressLabel.textContent = "0 / 0 tasks";
+    refs.goalStatus.textContent = "";
+    refs.goalProgressLabel.textContent = "0 / 0";
     refs.goalProgressBar.style.width = "0%";
     return;
   }
 
+  refs.goalbar.classList.remove("empty");
   const goalTasks = state.tasks.filter((task) => task.goal_id === goal.id);
   const completed = goalTasks.filter((task) => task.status === "completed").length;
   const total = goalTasks.length;
   const percent = total === 0 ? 0 : Math.round((completed / total) * 100);
 
   refs.goalTitle.textContent = goal.title;
-  refs.goalStatus.textContent = `${goal.status} • ${goal.description || "No description"}`;
-  if (state.workflow && state.workflow.status && state.workflow.status !== goal.status) {
-    refs.goalStatus.textContent = `${refs.goalStatus.textContent} • ${state.workflow.status}`;
+
+  const parts = [goal.status];
+  if (state.workflow.stage) parts.push(state.workflow.stage.replaceAll("_", " "));
+  if (state.workflow.current_phase_number) {
+    const phaseLabel = state.workflow.total_phases
+      ? `phase ${state.workflow.current_phase_number}/${state.workflow.total_phases}`
+      : `phase ${state.workflow.current_phase_number}`;
+    parts.push(state.workflow.current_phase_title ? `${phaseLabel} ${state.workflow.current_phase_title}` : phaseLabel);
   }
-  refs.goalSummary.textContent = goal.summary || "";
-  refs.goalProgressLabel.textContent = `${completed} / ${total} tasks`;
+  if (goal.max_review_rounds) parts.push(`review rounds ${goal.max_review_rounds}`);
+  if (goal.summary && (goal.status === "blocked" || goal.status === "failed")) {
+    parts.push(goal.summary);
+  } else if (goal.description) {
+    parts.push(goal.description);
+  }
+
+  refs.goalStatus.textContent = parts.filter(Boolean).join(" • ");
+  refs.goalProgressLabel.textContent = `${completed} / ${total}`;
   refs.goalProgressBar.style.width = `${percent}%`;
 }
 
 function renderWorkspace() {
-  refs.workspacePath.textContent = `Workspace: ${state.workspace.path || "unknown"}`;
+  refs.workspacePath.textContent = state.workspace.path || "unknown";
   refs.workspaceTree.textContent = "";
   if (!state.workspaceFiles.length) {
     const empty = document.createElement("p");
-    empty.className = "muted";
-    empty.textContent = "No workspace files found.";
+    empty.className = "empty-state";
+    empty.textContent = "No workspace files loaded.";
     refs.workspaceTree.appendChild(empty);
     return;
   }
@@ -319,118 +311,150 @@ function renderWorkspace() {
 }
 
 function renderHumanInputRequest() {
-  if (!state.humanInputRequest) {
-    refs.humanInputPanel.classList.add("hidden");
-    refs.humanInputPanel.textContent = "";
-    return;
-  }
-
-  refs.humanInputPanel.classList.remove("hidden");
+  refs.humanInputPanel.classList.add("hidden");
   refs.humanInputPanel.textContent = "";
-
-  const title = document.createElement("strong");
-  title.textContent = state.humanInputRequest.question;
-  const context = document.createElement("p");
-  context.className = "muted";
-  context.textContent = state.humanInputRequest.context || "";
-  const form = document.createElement("form");
-  form.className = "form-grid";
-  const input = document.createElement("textarea");
-  input.rows = 3;
-  input.placeholder = "Respond to the coordinator brain";
-  const button = document.createElement("button");
-  button.type = "submit";
-  button.textContent = "Send Response";
-  form.append(input, button);
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await apiPost("/api/brain/respond", { answer: input.value });
-    input.value = "";
-    state.humanInputRequest = null;
-    renderHumanInputRequest();
-  });
-
-  refs.humanInputPanel.append(title, context, form);
 }
 
-function renderBrainPanel() {
-  const trigger = state.brain.last_trigger || "no trigger";
-  refs.brainTrigger.textContent = trigger;
-  const inFlight = Boolean(state.brain.invocation_in_flight);
-  refs.brainInvocations.textContent = `${state.brain.invocation_count || 0} invocations • tokens ${state.brain.total_tokens_in || 0}/${state.brain.total_tokens_out || 0}${inFlight ? " • running" : ""}`;
+function renderWorkflowPanel() {
+  refs.brainTrigger.textContent = state.workflow.stage || "workflow";
+  refs.brainInvocations.textContent = formatWorkflowMeta(state.workflow);
   refs.workflowStatus.textContent = formatWorkflowStatus(state.workflow);
-  refs.brainProcess.textContent = formatBrainProcess(state.brain.last_invocation, state.workflow);
-  refs.brainThinking.textContent = state.brain.last_thinking || "No brain output yet.";
-  refs.brainProviderLabel.textContent = state.brain.active_provider || refs.brainProviderLabel.textContent;
+  refs.brainProcess.textContent = formatWorkflowProcess(primaryWorkflowInvocation(), state.workflow);
+  refs.brainThinking.textContent = formatWorkflowGuidance(state.workflow, state.currentGoal);
+  renderTransitions();
+}
 
+function renderTransitions() {
   refs.brainDecisions.textContent = "";
-  if (!state.lastBrainDecisions.length) {
+  const entries = workflowTransitions();
+  if (!entries.length) {
     const empty = document.createElement("p");
-    empty.className = "muted";
-    empty.textContent = "No decisions recorded yet.";
+    empty.className = "empty-state";
+    empty.textContent = "No transitions recorded yet.";
     refs.brainDecisions.appendChild(empty);
     return;
   }
 
-  state.lastBrainDecisions.forEach((decision) => {
+  entries.forEach((message) => {
     const item = document.createElement("article");
     item.className = "decision-item";
-    const action = document.createElement("strong");
-    action.textContent = decision.action;
-    const content = document.createElement("pre");
-    content.textContent = JSON.stringify(decision, null, 2);
-    item.append(action, content);
+
+    const header = document.createElement("strong");
+    header.textContent = `${formatTime(message.timestamp)} • ${message.content}`;
+    item.appendChild(header);
+
+    const meta = [];
+    if (message.metadata && message.metadata.goal) meta.push(`goal ${message.metadata.goal.status}`);
+    if (message.metadata && message.metadata.task) meta.push(`task ${message.metadata.task.status}`);
+    if (message.metadata && message.metadata.plan) meta.push("plan update");
+    if (meta.length) {
+      const metaEl = document.createElement("div");
+      metaEl.className = "card-meta";
+      metaEl.textContent = meta.join(" • ");
+      item.appendChild(metaEl);
+    }
+
     refs.brainDecisions.appendChild(item);
   });
 }
 
-function formatBrainProcess(invocation, workflow) {
-  if (!invocation) {
-    if (workflow && workflow.mode) {
-      return workflow.planner_mode === "disabled" ? "Planner idle. Deterministic workflow is driving execution." : "Planner idle. Deterministic workflow is driving execution unless a manual re-plan is requested.";
-    }
-    return "No brain process telemetry yet.";
+function workflowTransitions() {
+  const goalID = state.currentGoal ? state.currentGoal.id : "";
+  return state.messages
+    .filter((message) => {
+      if (message.type !== "system") return false;
+      if (message.from !== "coordinator" && message.from !== "system") return false;
+      if (goalID) {
+        if (message.metadata && message.metadata.goal && message.metadata.goal.id === goalID) return true;
+        if (message.metadata && message.metadata.task && message.metadata.task.goal_id === goalID) return true;
+        if (message.metadata && message.metadata.plan && message.metadata.plan.goal_id === goalID) return true;
+        return false;
+      }
+      return Boolean(message.metadata && (message.metadata.goal || message.metadata.plan || message.metadata.task));
+    })
+    .slice(-8);
+}
+
+function primaryWorkflowInvocation() {
+  const runningTask = state.tasks.find((task) => task.status === "running");
+  if (runningTask) {
+    return state.agents[runningTask.assigned_to]?.last_invocation || null;
   }
-  const parts = [
-    invocation.status || "unknown",
-    invocation.command || "unknown command",
-  ];
-  if (invocation.pid) {
-    parts.push(`pid ${invocation.pid}`);
+
+  const failedTask = state.tasks
+    .slice()
+    .reverse()
+    .find((task) => task.status === "failed" || task.status === "cancelled");
+  if (failedTask) {
+    return state.agents[failedTask.assigned_to]?.last_invocation || null;
   }
-  if (invocation.timeout_seconds) {
-    parts.push(`timeout ${invocation.timeout_seconds}s`);
-  }
-  if (invocation.stdout_bytes || invocation.stderr_bytes) {
-    parts.push(`io ${invocation.stdout_bytes || 0}/${invocation.stderr_bytes || 0} bytes`);
-  }
-  if (invocation.trace_id) {
-    parts.push(`trace ${invocation.trace_id.slice(0, 12)}`);
-  }
-  if (invocation.error) {
-    parts.push(invocation.error);
+
+  return null;
+}
+
+function formatWorkflowMeta(workflow) {
+  if (!workflow || !workflow.mode) return "No active workflow.";
+  const parts = [workflow.mode];
+  if (workflow.recipe) parts.push(workflow.recipe);
+  if (workflow.review_round) {
+    const rounds = workflow.max_review_rounds
+      ? `review round ${workflow.review_round}/${workflow.max_review_rounds}`
+      : `review round ${workflow.review_round}`;
+    parts.push(rounds);
+  } else if (workflow.max_review_rounds) {
+    parts.push(`max review rounds ${workflow.max_review_rounds}`);
   }
   return parts.join(" • ");
 }
 
 function formatWorkflowStatus(workflow) {
-  if (!workflow || !workflow.mode) {
-    return "No active workflow state.";
-  }
-  const parts = [workflow.mode];
-  if (workflow.planner_mode) {
-    parts.push(`planner ${workflow.planner_mode}`);
-  }
-  if (workflow.status) {
-    parts.push(workflow.status);
-  }
+  if (!workflow || !workflow.mode) return "No active workflow state.";
+  const parts = [workflow.status || "idle"];
+  if (workflow.stage) parts.push(workflow.stage.replaceAll("_", " "));
   if (workflow.current_phase_number) {
     const phaseLabel = workflow.total_phases
       ? `phase ${workflow.current_phase_number}/${workflow.total_phases}`
       : `phase ${workflow.current_phase_number}`;
     parts.push(workflow.current_phase_title ? `${phaseLabel} ${workflow.current_phase_title}` : phaseLabel);
   }
+  if (workflow.last_error) parts.push(`error: ${workflow.last_error}`);
   return parts.join(" • ");
+}
+
+function formatWorkflowProcess(invocation, workflow) {
+  if (!invocation) {
+    if (workflow && workflow.status === "blocked" && workflow.last_error) {
+      return `Workflow blocked • ${workflow.last_error}`;
+    }
+    return "No active worker process telemetry yet.";
+  }
+  const parts = [invocation.status || "unknown"];
+  if (invocation.command) parts.push(invocation.command);
+  if (invocation.pid) parts.push(`pid ${invocation.pid}`);
+  if (invocation.timeout_seconds) parts.push(`timeout ${invocation.timeout_seconds}s`);
+  if (invocation.stdout_bytes || invocation.stderr_bytes) {
+    parts.push(`io ${invocation.stdout_bytes || 0}/${invocation.stderr_bytes || 0} bytes`);
+  }
+  if (invocation.trace_id) parts.push(`trace ${String(invocation.trace_id).slice(0, 12)}`);
+  if (invocation.error) parts.push(invocation.error);
+  return parts.join(" • ");
+}
+
+function formatWorkflowGuidance(workflow, goal) {
+  if (!goal) {
+    return "Submit a goal to start the deterministic spec workflow.";
+  }
+  const lines = [];
+  lines.push(`Recipe: ${workflow.recipe || workflow.mode || "deterministic"}`);
+  if (workflow.stage) lines.push(`Stage: ${workflow.stage.replaceAll("_", " ")}`);
+  if (workflow.stage_detail) lines.push(workflow.stage_detail);
+  if (goal.summary && (goal.status === "blocked" || goal.status === "failed")) {
+    lines.push(`Failure: ${goal.summary}`);
+  }
+  if (workflow.last_error && workflow.last_error !== goal.summary) {
+    lines.push(`Coordinator note: ${workflow.last_error}`);
+  }
+  return lines.join("\n\n");
 }
 
 function renderPlan() {
@@ -438,152 +462,166 @@ function renderPlan() {
   refs.planInput.value = state.plan ? JSON.stringify(state.plan, null, 2) : "";
   if (!state.plan || !state.plan.phases || state.plan.phases.length === 0) {
     const empty = document.createElement("p");
-    empty.className = "muted";
+    empty.className = "empty-state";
     empty.textContent = "No active plan.";
     refs.planView.appendChild(empty);
     return;
   }
 
+  const grid = document.createElement("div");
+  grid.className = "plan-grid";
+
   state.plan.phases.forEach((phase) => {
     const phaseCard = document.createElement("article");
     phaseCard.className = "phase-card";
 
-    const head = document.createElement("div");
-    head.className = "plan-head";
+    const header = document.createElement("div");
+    header.className = "phase-card-header";
+    const titleWrap = document.createElement("div");
     const title = document.createElement("div");
-    const phaseTitle = document.createElement("strong");
-    phaseTitle.textContent = `Phase ${phase.number}: ${phase.title}`;
-    const phaseDesc = document.createElement("p");
-    phaseDesc.className = "muted";
-    phaseDesc.textContent = phase.description || "";
-    title.append(phaseTitle, phaseDesc);
-
-    const status = document.createElement("span");
-    status.className = "badge";
-    status.textContent = phaseStatus(phase);
-    head.append(title, status);
+    title.className = "phase-card-title";
+    title.textContent = `Phase ${phase.number}: ${phase.title}`;
+    titleWrap.appendChild(title);
+    if (phase.description) {
+      const desc = document.createElement("div");
+      desc.className = "phase-card-desc";
+      desc.textContent = phase.description;
+      titleWrap.appendChild(desc);
+    }
+    const statusTag = document.createElement("span");
+    statusTag.className = `tag ${phaseStatusTagClass(phase)}`;
+    statusTag.textContent = phaseStatus(phase);
+    header.append(titleWrap, statusTag);
 
     const tasks = document.createElement("div");
     tasks.className = "phase-tasks";
     (phase.tasks || []).forEach((plannedTask) => {
       const actual = state.tasks.find((task) => task.id === plannedTask.real_task_id);
-      const taskCard = document.createElement("div");
-      taskCard.className = `phase-task ${actual && actual.status === "completed" ? "completed" : ""}`;
+      const taskEl = document.createElement("div");
+      taskEl.className = `phase-task${actual && actual.status === "completed" ? " completed" : ""}`;
 
-      const taskHead = document.createElement("div");
-      taskHead.className = "phase-task-head";
-      const taskTitle = document.createElement("strong");
+      const taskHeader = document.createElement("div");
+      taskHeader.className = "phase-task-header";
+      const taskTitle = document.createElement("span");
+      taskTitle.className = "phase-task-title";
       taskTitle.textContent = plannedTask.title;
-      const taskBadge = document.createElement("span");
-      taskBadge.className = "pill";
-      taskBadge.textContent = actual ? `${actual.assigned_to} • ${actual.status}` : `${plannedTask.assign_to} • planned`;
-      taskHead.append(taskTitle, taskBadge);
+      const taskTag = document.createElement("span");
+      taskTag.className = "tag";
+      taskTag.textContent = actual ? `${actual.assigned_to} • ${actual.status}` : `${plannedTask.assign_to} • planned`;
+      taskHeader.append(taskTitle, taskTag);
 
       const meta = document.createElement("div");
-      meta.className = "phase-task-meta";
+      meta.className = "tags";
+      meta.style.marginTop = "4px";
       meta.append(
-        pill(`priority ${plannedTask.priority || 3}`),
-        pill(plannedTask.review_by ? `review ${plannedTask.review_by}` : "no review"),
+        tag(`p${plannedTask.priority || 3}`),
+        tag(plannedTask.review_by ? `review: ${plannedTask.review_by}` : "no review"),
       );
 
       const desc = document.createElement("pre");
       desc.textContent = plannedTask.description;
-      const deps = document.createElement("p");
-      deps.className = "muted";
+
+      const deps = document.createElement("div");
+      deps.className = "card-meta";
       deps.textContent = plannedTask.depends_on && plannedTask.depends_on.length
         ? `depends on ${plannedTask.depends_on.join(", ")}`
         : "no dependencies";
 
-      taskCard.append(taskHead, meta, desc, deps);
-      tasks.appendChild(taskCard);
+      taskEl.append(taskHeader, meta, desc, deps);
+      tasks.appendChild(taskEl);
     });
 
-    phaseCard.append(head, tasks);
-    refs.planView.appendChild(phaseCard);
+    phaseCard.append(header, tasks);
+    grid.appendChild(phaseCard);
   });
+
+  refs.planView.appendChild(grid);
 }
 
 function renderAgents() {
   refs.agentsList.textContent = "";
-  Object.values(state.agents)
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .forEach((agent) => {
-      const card = document.createElement("article");
-      card.className = "agent-card";
-      if (state.agentFilter === agent.name) {
-        card.classList.add("active");
-      }
+  const agentList = Object.values(state.agents).sort((a, b) => a.name.localeCompare(b.name));
 
-      const head = document.createElement("div");
-      head.className = "agent-head";
-      const left = document.createElement("div");
-      const name = document.createElement("strong");
-      name.textContent = agent.name;
-      const activeTask = currentTaskForAgent(agent.name);
-      const meta = document.createElement("div");
-      meta.className = "agent-meta";
-      meta.append(pill(agent.provider || "unknown"), pill(agent.role || "unknown"), pill(agent.status));
-      if (activeTask && activeTask.revision_count) {
-        meta.appendChild(pill(`rev ${activeTask.revision_count}`));
-      }
-      left.append(name, meta);
+  if (!agentList.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No agents connected.";
+    refs.agentsList.appendChild(empty);
+    return;
+  }
 
-      const status = document.createElement("span");
-      status.innerHTML = `<span class="status-dot status-${agent.status}"></span>`;
-      head.append(left, status);
+  agentList.forEach((agent) => {
+    const card = document.createElement("article");
+    card.className = "card agent-card";
+    if (state.agentFilter === agent.name) card.classList.add("active-filter");
 
-      const detail = document.createElement("p");
-      detail.className = "muted";
-      detail.textContent = activeTask
-        ? `task ${activeTask.title} • ${elapsed(activeTask.started_at || activeTask.created_at)}`
-        : "no active task";
+    const header = document.createElement("div");
+    header.className = "card-header";
+    const left = document.createElement("div");
+    const name = document.createElement("span");
+    name.className = "card-title";
+    name.textContent = agent.name;
+    const tags = document.createElement("div");
+    tags.className = "tags";
+    tags.style.marginTop = "4px";
+    tags.append(tag(agent.provider || "unknown"), tag(agent.role || "unknown"), statusTag(agent.status));
+    const activeTask = currentTaskForAgent(agent.name);
+    if (activeTask && activeTask.revision_count) {
+      tags.appendChild(tag(`rev ${activeTask.revision_count}`));
+    }
+    left.append(name, tags);
 
-      const process = document.createElement("p");
-      process.className = "muted";
-      process.textContent = formatAgentProcess(agent);
+    const dot = document.createElement("span");
+    dot.className = `dot dot-${agent.status}`;
+    header.append(left, dot);
 
-      const stats = document.createElement("p");
-      stats.className = "muted";
-      stats.textContent = `completed ${agent.tasks_completed || 0} • failed ${agent.tasks_failed || 0} • tokens ${agent.total_tokens_in || 0}/${agent.total_tokens_out || 0}`;
+    const detail = document.createElement("div");
+    detail.className = "card-meta";
+    detail.textContent = activeTask
+      ? `task: ${activeTask.title} • ${elapsed(activeTask.started_at || activeTask.created_at)}`
+      : "no active task";
 
-      const actions = document.createElement("div");
-      actions.className = "agent-actions";
+    const process = document.createElement("div");
+    process.className = "card-meta";
+    process.textContent = formatAgentProcess(agent);
 
-      const filter = document.createElement("button");
-      filter.type = "button";
-      filter.textContent = state.agentFilter === agent.name ? "Show All" : "Filter";
-      filter.addEventListener("click", () => {
-        state.agentFilter = state.agentFilter === agent.name ? "" : agent.name;
-        refs.agentFilter.value = state.agentFilter;
-        renderAgents();
-        renderMessages();
-      });
-      actions.appendChild(filter);
+    const stats = document.createElement("div");
+    stats.className = "card-meta";
+    stats.textContent = `completed ${agent.tasks_completed || 0} • failed ${agent.tasks_failed || 0} • tokens ${agent.total_tokens_in || 0}/${agent.total_tokens_out || 0}`;
 
-      if (agent.status === "paused") {
-        actions.appendChild(actionButton("Resume", () => apiPost(`/api/agents/${agent.name}/resume`)));
-      } else if (agent.status !== "busy") {
-        actions.appendChild(actionButton("Pause", () => apiPost(`/api/agents/${agent.name}/pause`)));
-      }
-      actions.appendChild(actionButton("Reset", () => apiPost(`/api/agents/${agent.name}/reset`)));
+    const actions = document.createElement("div");
+    actions.className = "card-actions";
 
-      card.append(head, detail, process, stats, actions);
-      refs.agentsList.appendChild(card);
+    const filter = document.createElement("button");
+    filter.type = "button";
+    filter.className = "btn-sm";
+    filter.textContent = state.agentFilter === agent.name ? "Show All" : "Filter";
+    filter.addEventListener("click", () => {
+      state.agentFilter = state.agentFilter === agent.name ? "" : agent.name;
+      refs.agentFilter.value = state.agentFilter;
+      renderAgents();
+      renderMessages();
     });
+    actions.appendChild(filter);
+
+    if (agent.status === "paused") {
+      actions.appendChild(actionButton("Resume", () => apiPost(`/api/agents/${agent.name}/resume`)));
+    } else if (agent.status !== "busy") {
+      actions.appendChild(actionButton("Pause", () => apiPost(`/api/agents/${agent.name}/pause`)));
+    }
+    actions.appendChild(actionButton("Reset", () => apiPost(`/api/agents/${agent.name}/reset`)));
+
+    card.append(header, detail, process, stats, actions);
+    refs.agentsList.appendChild(card);
+  });
 }
 
 function formatAgentProcess(agent) {
   const invocation = agent.last_invocation;
-  if (!invocation) {
-    return "no worker telemetry yet";
-  }
+  if (!invocation) return "no worker telemetry yet";
   const parts = [invocation.status || "unknown"];
-  if (invocation.pid) {
-    parts.push(`pid ${invocation.pid}`);
-  }
-  if (invocation.timeout_seconds) {
-    parts.push(`timeout ${invocation.timeout_seconds}s`);
-  }
+  if (invocation.pid) parts.push(`pid ${invocation.pid}`);
+  if (invocation.timeout_seconds) parts.push(`timeout ${invocation.timeout_seconds}s`);
   if (invocation.stdout_bytes || invocation.stderr_bytes) {
     parts.push(`io ${invocation.stdout_bytes || 0}/${invocation.stderr_bytes || 0}`);
   }
@@ -597,6 +635,7 @@ function formatAgentProcess(agent) {
 
 function renderTasks() {
   refs.tasksList.textContent = "";
+
   const groups = {
     running: [],
     pending: [],
@@ -608,22 +647,22 @@ function renderTasks() {
 
   state.tasks.forEach((task) => {
     const status = task.status === "blocked" ? "pending" : task.status;
-    if (groups[status]) {
-      groups[status].push(task);
-    }
+    if (groups[status]) groups[status].push(task);
   });
 
+  const activeCount = groups.running.length + groups.pending.length + groups.review.length;
+  refs.tabTasksCount.textContent = activeCount > 0 ? `(${activeCount})` : "";
+
+  let hasAny = false;
   Object.entries(groups).forEach(([status, tasks]) => {
-    if (!tasks.length) {
-      return;
-    }
+    if (!tasks.length) return;
+    hasAny = true;
+
     const group = document.createElement("section");
     group.className = "task-group";
     const head = document.createElement("div");
     head.className = "group-title";
-    const title = document.createElement("strong");
-    title.textContent = `${status} (${tasks.length})`;
-    head.appendChild(title);
+    head.innerHTML = `${status} <span class="group-count">${tasks.length}</span>`;
     group.appendChild(head);
 
     tasks
@@ -635,73 +674,106 @@ function renderTasks() {
 
     refs.tasksList.appendChild(group);
   });
+
+  if (!hasAny) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No tasks.";
+    refs.tasksList.appendChild(empty);
+  }
 }
 
 function renderTaskCard(task) {
   const card = document.createElement("article");
-  card.className = `task-card ${task.status}`;
+  card.className = `card status-${task.status}`;
 
-  const head = document.createElement("div");
-  head.className = "task-head";
-  const title = document.createElement("div");
-  const strong = document.createElement("strong");
-  strong.textContent = task.title;
-  const meta = document.createElement("div");
-  meta.className = "task-meta";
-  meta.append(
-    pill(task.assigned_to),
-    pill(task.status),
-    pill(`p${task.priority || 3}`),
-    task.goal_id ? pill(`goal ${task.goal_id.slice(0, 8)}`) : pill("manual"),
+  const header = document.createElement("div");
+  header.className = "card-header";
+  const titleWrap = document.createElement("div");
+  const title = document.createElement("span");
+  title.className = "card-title";
+  title.textContent = task.title;
+  const tags = document.createElement("div");
+  tags.className = "tags";
+  tags.style.marginTop = "4px";
+  tags.append(
+    tag(task.assigned_to),
+    statusTag(task.status),
+    tag(`p${task.priority || 3}`),
+    task.goal_id ? tag(`goal ${task.goal_id.slice(0, 8)}`) : tag("manual"),
   );
-  title.append(strong, meta);
+  titleWrap.append(title, tags);
   const timer = document.createElement("span");
-  timer.className = "muted";
+  timer.className = "card-meta";
+  timer.style.marginTop = "0";
   timer.textContent = task.status === "running" ? elapsed(task.started_at || task.created_at) : formatTime(task.created_at);
-  head.append(title, timer);
+  header.append(titleWrap, timer);
 
-  const desc = document.createElement("pre");
-  desc.textContent = task.description;
+  const desc = document.createElement("div");
+  desc.className = "card-body";
+  const descPre = document.createElement("pre");
+  descPre.textContent = task.description;
+  desc.appendChild(descPre);
 
-  const info = document.createElement("p");
-  info.className = "muted";
+  const info = document.createElement("div");
+  info.className = "card-meta";
   info.textContent = [
     task.depends_on && task.depends_on.length ? `depends on ${task.depends_on.join(", ")}` : "no dependencies",
-    task.review_by ? `review ${task.review_by}` : "no review",
+    task.review_by ? `review: ${task.review_by}` : "no review",
     task.revision_count ? `revision ${task.revision_count}` : "",
   ].filter(Boolean).join(" • ");
 
-  card.append(head, desc, info);
+  card.append(header, desc, info);
 
   if (task.result) {
-    const result = document.createElement("pre");
-    result.textContent = task.result;
+    const result = document.createElement("div");
+    result.className = "card-body";
+    const resultPre = document.createElement("pre");
+    resultPre.textContent = task.result;
+    result.appendChild(resultPre);
     card.appendChild(result);
   }
 
+  if (task.error_output) {
+    const error = document.createElement("div");
+    error.className = "card-body";
+    const label = document.createElement("div");
+    label.className = "card-meta";
+    label.textContent = "error output";
+    const errorPre = document.createElement("pre");
+    errorPre.textContent = task.error_output;
+    error.append(label, errorPre);
+    card.appendChild(error);
+  }
+
   if (task.review_result) {
-    const review = document.createElement("pre");
-    review.textContent = `review: ${task.review_result}`;
+    const review = document.createElement("div");
+    review.className = "card-body";
+    const reviewPre = document.createElement("pre");
+    reviewPre.textContent = `review: ${task.review_result}`;
+    review.appendChild(reviewPre);
     card.appendChild(review);
   }
 
   const actions = document.createElement("div");
-  actions.className = "task-actions";
+  actions.className = "card-actions";
 
   if (task.status === "review") {
     actions.appendChild(actionButton("Accept", () => apiPost(`/api/tasks/${task.id}/approve`)));
     actions.appendChild(actionButton("Reject", () => {
       const reason = window.prompt("Reason for rejection");
-      if (reason) {
-        apiPost(`/api/tasks/${task.id}/reject`, { reason });
-      }
+      if (reason) apiPost(`/api/tasks/${task.id}/reject`, { reason });
     }));
+  }
+
+  if (task.status === "failed" || task.status === "cancelled") {
+    actions.appendChild(actionButton("Retry", () => apiPost(`/api/tasks/${task.id}/retry`)));
   }
 
   if (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
     actions.appendChild(actionButton("Cancel", () => apiPost(`/api/tasks/${task.id}/cancel`)));
     const assign = document.createElement("select");
-    assign.className = "select-inline";
+    assign.className = "select-inline btn-sm";
     appendOption(assign, "", "Reassign");
     Object.keys(state.agents).sort().forEach((name) => appendOption(assign, name, name));
     assign.addEventListener("change", () => {
@@ -712,54 +784,62 @@ function renderTaskCard(task) {
     actions.appendChild(assign);
   }
 
-  if (actions.children.length) {
-    card.appendChild(actions);
-  }
+  if (actions.children.length) card.appendChild(actions);
   return card;
 }
 
 function renderMessages() {
   refs.messageList.textContent = "";
-  const filtered = state.messages.filter((message) => {
-    if (!state.messageTypeFilter.has(message.type)) {
-      return false;
-    }
-    if (state.agentFilter && message.from !== state.agentFilter && message.to !== state.agentFilter) {
-      return false;
-    }
-    if (state.search && !JSON.stringify(message).toLowerCase().includes(state.search)) {
-      return false;
-    }
-    return true;
-  }).slice(-500);
+  const filtered = state.messages
+    .filter((message) => {
+      if (!state.messageTypeFilter.has(message.type)) return false;
+      if (state.agentFilter && message.from !== state.agentFilter && message.to !== state.agentFilter) return false;
+      if (state.search && !JSON.stringify(message).toLowerCase().includes(state.search)) return false;
+      return true;
+    })
+    .slice(-500);
+
+  if (!filtered.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No messages.";
+    refs.messageList.appendChild(empty);
+    return;
+  }
 
   filtered.forEach((message) => {
     const card = document.createElement("article");
-    const brainMessage = message.from === "brain" || message.to === "brain";
-    card.className = `message-card ${brainMessage ? "brain-message" : ""} ${message.type === "system" ? "system-message" : ""} ${brainMessage && message.metadata && !message.metadata.task ? "brain-thinking" : ""}`;
+    const isSystem = message.type === "system";
+    card.className = `message-card${isSystem ? " system-message" : ""}`;
 
-    const head = document.createElement("div");
-    head.className = "message-head";
-    const title = document.createElement("strong");
-    title.textContent = `${formatTime(message.timestamp)} ${message.from} → ${message.to}`;
-    const badge = document.createElement("span");
-    badge.className = "badge";
-    badge.textContent = message.type;
-    head.append(title, badge);
+    const header = document.createElement("div");
+    header.className = "message-header";
+    const from = document.createElement("span");
+    from.className = "message-from";
+    from.textContent = `${message.from} → ${message.to}`;
+    const headerRight = document.createElement("div");
+    headerRight.className = "tags";
+    headerRight.append(tag(formatTime(message.timestamp)), tag(message.type));
+    header.append(from, headerRight);
 
-    const body = document.createElement("pre");
-    body.textContent = message.content;
-    card.append(head, body);
+    const body = document.createElement("div");
+    body.className = "message-body";
+    const bodyPre = document.createElement("pre");
+    bodyPre.textContent = message.content;
+    body.appendChild(bodyPre);
+
+    card.append(header, body);
 
     const metaParts = [];
     if (message.task_id) metaParts.push(`task ${message.task_id}`);
-    if (message.metadata && message.metadata.tokens_in) metaParts.push(`tokens in ${message.metadata.tokens_in}`);
-    if (message.metadata && message.metadata.tokens_out) metaParts.push(`tokens out ${message.metadata.tokens_out}`);
-    if (message.metadata && message.metadata.duration_ms) metaParts.push(`duration ${message.metadata.duration_ms}ms`);
-    if (message.metadata && message.metadata.error) metaParts.push(`error ${message.metadata.error}`);
+    if (message.metadata && message.metadata.tokens_in) metaParts.push(`in ${message.metadata.tokens_in}`);
+    if (message.metadata && message.metadata.tokens_out) metaParts.push(`out ${message.metadata.tokens_out}`);
+    if (message.metadata && message.metadata.duration_ms) metaParts.push(`${message.metadata.duration_ms}ms`);
+    if (message.metadata && message.metadata.error) metaParts.push(`error: ${message.metadata.error}`);
+    if (message.metadata && message.metadata.raw_output) metaParts.push("has raw output");
     if (metaParts.length) {
-      const meta = document.createElement("p");
-      meta.className = "muted";
+      const meta = document.createElement("div");
+      meta.className = "card-meta";
       meta.textContent = metaParts.join(" • ");
       card.appendChild(meta);
     }
@@ -787,6 +867,24 @@ function phaseStatus(phase) {
   return "planned";
 }
 
+function phaseStatusTagClass(phase) {
+  const status = phaseStatus(phase);
+  if (status === "completed") return "tag-success";
+  if (status === "running") return "tag-accent";
+  if (status === "in progress") return "tag-warning";
+  return "";
+}
+
+function statusTag(status) {
+  const el = tag(status);
+  if (status === "running" || status === "busy") el.classList.add("tag-accent");
+  else if (status === "completed" || status === "idle") el.classList.add("tag-success");
+  else if (status === "failed" || status === "error" || status === "blocked") el.classList.add("tag-danger");
+  else if (status === "review") el.classList.add("tag-warning");
+  else if (status === "paused") el.classList.add("tag-purple");
+  return el;
+}
+
 function toggleComposerFields() {
   const isTask = refs.sendMode.value === "task";
   const isMessage = refs.sendMode.value === "message";
@@ -798,12 +896,15 @@ function toggleComposerFields() {
 
 async function submitGoal(event) {
   event.preventDefault();
+  const parsedRounds = Number.parseInt(refs.goalInputReviewRounds.value, 10);
   await apiPost("/api/goals", {
     title: refs.goalInputTitle.value,
     description: refs.goalInputDescription.value,
+    max_review_rounds: Number.isFinite(parsedRounds) && parsedRounds > 0 ? parsedRounds : 0,
   });
   refs.goalInputTitle.value = "";
   refs.goalInputDescription.value = "";
+  refs.goalInputReviewRounds.value = "";
 }
 
 async function submitComposer(event) {
@@ -816,38 +917,20 @@ async function submitComposer(event) {
       review_by: refs.reviewAgent.value,
       depends_on: refs.dependsOn.value.split(",").map((value) => value.trim()).filter(Boolean),
     });
-  } else if (refs.sendMode.value === "message") {
+  } else {
     await apiPost("/api/messages", {
       to: refs.targetAgent.value,
       content: refs.composerInput.value,
     });
-  } else {
-    await apiPost("/api/brain/respond", {
-      answer: refs.composerInput.value,
-    });
   }
-
   refs.composerInput.value = "";
   refs.taskTitle.value = "";
   refs.dependsOn.value = "";
 }
 
-async function forceReplan() {
-  const guidance = window.prompt("Optional guidance for the re-plan");
-  await apiPost("/api/brain/replan", { guidance: guidance || "" });
-}
-
-async function switchBrain() {
-  await apiPost("/api/brain/switch", { provider: refs.brainProviderSelect.value });
-}
-
 async function killGoal() {
-  if (!state.currentGoal) {
-    return;
-  }
-  if (!window.confirm(`Kill goal "${state.currentGoal.title}"?`)) {
-    return;
-  }
+  if (!state.currentGoal) return;
+  if (!window.confirm(`Kill goal "${state.currentGoal.title}"?`)) return;
   await apiPost(`/api/goals/${state.currentGoal.id}/kill`);
 }
 
@@ -886,13 +969,10 @@ async function apiPost(path, body = undefined) {
 async function refreshWorkspace() {
   try {
     const response = await fetch("/api/workspace/files");
-    if (!response.ok) {
-      return;
-    }
+    if (!response.ok) return;
     state.workspaceFiles = await response.json();
     renderWorkspace();
-  } catch (_) {
-  }
+  } catch (_) {}
 }
 
 function upsertTask(task) {
@@ -911,7 +991,7 @@ function upsertGoal(goal) {
   } else {
     state.goals.push(goal);
   }
-  state.currentGoal = state.goals.find((entry) => ["planning", "active"].includes(entry.status)) || goal;
+  state.currentGoal = state.goals.find((entry) => ["planning", "active", "blocked"].includes(entry.status)) || goal;
 }
 
 function currentTaskForAgent(agentName) {
@@ -936,9 +1016,7 @@ function buildFileTree(paths) {
         };
         cursor.push(entry);
       }
-      if (index < parts.length - 1) {
-        entry.type = "folder";
-      }
+      if (index < parts.length - 1) entry.type = "folder";
       cursor = entry.children;
     });
   });
@@ -970,22 +1048,21 @@ function renderTreeNode(node) {
 function actionButton(label, handler) {
   const button = document.createElement("button");
   button.type = "button";
+  button.className = "btn-sm";
   button.textContent = label;
   button.addEventListener("click", handler);
   return button;
 }
 
-function pill(text) {
+function tag(text) {
   const span = document.createElement("span");
-  span.className = "pill";
+  span.className = "tag";
   span.textContent = text;
   return span;
 }
 
 function elapsed(timestamp) {
-  if (!timestamp) {
-    return "0s";
-  }
+  if (!timestamp) return "0s";
   const totalSeconds = Math.max(0, Math.floor((Date.now() - Date.parse(timestamp)) / 1000));
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;

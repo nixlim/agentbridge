@@ -42,6 +42,7 @@ type Task struct {
 	ReviewResult       string     `json:"review_result,omitempty"`
 	ReviewReason       string     `json:"review_reason,omitempty"`
 	ReviewActionTaskID string     `json:"review_action_task_id,omitempty"`
+	ErrorOutput        string     `json:"error_output,omitempty"`
 	IsReviewTask       bool       `json:"is_review_task,omitempty"`
 	IsHumanMessage     bool       `json:"is_human_message,omitempty"`
 	RevisionOf         string     `json:"revision_of,omitempty"`
@@ -92,6 +93,7 @@ func (t *Task) Start() error {
 	now := time.Now().UTC()
 	t.Status = TaskRunning
 	t.StartedAt = &now
+	t.CompletedAt = nil
 	return nil
 }
 
@@ -145,6 +147,16 @@ func (t *Task) Fail(reason string) error {
 	t.Status = TaskFailed
 	t.Result = reason
 	t.CompletedAt = &now
+	return nil
+}
+
+func (t *Task) Retry() error {
+	if t.Status != TaskFailed && t.Status != TaskCancelled {
+		return errors.New("task cannot be retried from current state")
+	}
+	t.Status = TaskPending
+	t.CompletedAt = nil
+	t.StartedAt = nil
 	return nil
 }
 

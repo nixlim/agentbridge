@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -61,6 +62,40 @@ func (a *scriptedAgent) ParseOutput(raw []byte) (*AgentResult, error) {
 }
 
 func (a *scriptedAgent) IsAvailable() bool { return a.available }
+
+type hangingFileAgent struct {
+	name      string
+	filePath  string
+	content   string
+	available bool
+}
+
+func (a *hangingFileAgent) Name() string { return a.name }
+
+func (a *hangingFileAgent) Execute(ctx context.Context, prompt string, workDir string) (*AgentResult, error) {
+	if !a.available {
+		return nil, fmt.Errorf("agent unavailable")
+	}
+	if observer := commandTelemetryObserverFromContext(ctx); observer != nil {
+		observer.ProcessStarted(os.Getpid())
+		observer.WaitStarted()
+	}
+	fullPath := filepath.Join(workDir, filepath.FromSlash(a.filePath))
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(fullPath, []byte(a.content), 0o644); err != nil {
+		return nil, err
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (a *hangingFileAgent) ParseOutput(raw []byte) (*AgentResult, error) {
+	return &AgentResult{RawOutput: string(raw), Summary: string(raw)}, nil
+}
+
+func (a *hangingFileAgent) IsAvailable() bool { return a.available }
 
 type scriptedBrain struct {
 	mode      string
@@ -391,7 +426,7 @@ func TestSpecGoalCreatesDraftReviewAndReviseWorkflow(t *testing.T) {
 
 	coordinator := NewCoordinator(cfg, map[string]Agent{
 		"spec-1":   &scriptedAgent{name: "spec-1", responses: []string{"initial spec", "revised spec"}, delay: 20 * time.Millisecond, available: true},
-		"review-1": &scriptedAgent{name: "review-1", responses: []string{"needs a clearer acceptance criteria section"}, delay: 20 * time.Millisecond, available: true},
+		"review-1": &scriptedAgent{name: "review-1", responses: []string{"VERDICT: FAIL\n\nBLOCKERS\n- needs a clearer acceptance criteria section", "VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent."}, delay: 20 * time.Millisecond, available: true},
 	}, nil, workspace, store, hub)
 	coordinator.Start()
 	defer func() { _ = coordinator.Stop(context.Background()) }()
@@ -420,24 +455,29 @@ func TestSpecGoalCreatesDraftReviewAndReviseWorkflow(t *testing.T) {
 	if current.Status != GoalCompleted {
 		t.Fatalf("expected goal completed, got %s with snapshot %#v", current.Status, coordinator.Snapshot())
 	}
-	if len(tasks) != 3 {
-		t.Fatalf("expected draft, review, and revise tasks, got %d", len(tasks))
+	if len(tasks) != 4 {
+		t.Fatalf("expected prepare, review, amend, and final review tasks, got %d", len(tasks))
 	}
-	if plan == nil || len(plan.Phases) != 3 {
-		t.Fatalf("expected three workflow phases, got %#v", plan)
+	if plan == nil || len(plan.Phases) != 4 {
+		t.Fatalf("expected four workflow phases, got %#v", plan)
 	}
 	statusByTitle := make(map[string]TaskStatus, len(tasks))
 	for _, task := range tasks {
 		statusByTitle[task.Title] = task.Status
 	}
-	for _, title := range []string{"Draft B2 spec", "Review B2 spec", "Revise B2 spec"} {
+	for _, title := range []string{
+		"Prepare B2 spec Specification",
+		"Adversarial Review B2 spec Round 1",
+		"Amend B2 spec Specification Round 1",
+		"Adversarial Review B2 spec Round 2",
+	} {
 		if statusByTitle[title] != TaskCompleted {
 			t.Fatalf("expected %q completed, got %s", title, statusByTitle[title])
 		}
 	}
 }
 
-func TestGoalFailureFailsWorkflowWithoutBrain(t *testing.T) {
+func TestGoalFailureBlocksWorkflowWithoutBrain(t *testing.T) {
 	cfg := newGoalTestConfig(t.TempDir())
 
 	workspace := NewWorkspace(cfg.Workspace)
@@ -471,18 +511,188 @@ func TestGoalFailureFailsWorkflowWithoutBrain(t *testing.T) {
 
 	waitFor(t, 2*time.Second, func() bool {
 		current, _, _, err := coordinator.GetGoal(goal.ID)
-		return err == nil && current.Status == GoalFailed
+		return err == nil && current.Status == GoalBlocked
 	})
 
 	current, _, _, err := coordinator.GetGoal(goal.ID)
 	if err != nil {
 		t.Fatalf("GetGoal() error = %v", err)
 	}
-	if current.Status != GoalFailed {
-		t.Fatalf("expected failed goal, got %s", current.Status)
+	if current.Status != GoalBlocked {
+		t.Fatalf("expected blocked goal, got %s", current.Status)
 	}
 	if !strings.Contains(current.Summary, "task") {
 		t.Fatalf("expected task failure summary, got %q", current.Summary)
+	}
+}
+
+func TestSpecWorkflowAutoCompletesQuiescentArtifactTask(t *testing.T) {
+	prevTick := workflowTickInterval
+	prevQuiet := fileArtifactQuietThreshold
+	workflowTickInterval = 25 * time.Millisecond
+	fileArtifactQuietThreshold = 50 * time.Millisecond
+	defer func() {
+		workflowTickInterval = prevTick
+		fileArtifactQuietThreshold = prevQuiet
+	}()
+
+	cfg := newGoalTestConfig(t.TempDir())
+	cfg.Team = []TeamMemberConfig{
+		{
+			Name:        "spec-1",
+			Provider:    "claude",
+			Role:        "spec_creator",
+			Count:       1,
+			Description: "Creates specifications",
+		},
+		{
+			Name:        "review-1",
+			Provider:    "codex",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications",
+		},
+	}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"spec-1":   &hangingFileAgent{name: "spec-1", filePath: "specs/b2-spec-spec.md", content: "# spec", available: true},
+		"review-1": &scriptedAgent{name: "review-1", responses: []string{"VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent."}, delay: 20 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	goal, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:       "B2 spec",
+		Description: "Create and review a technical spec document",
+	})
+	if err != nil {
+		t.Fatalf("SubmitGoal() error = %v", err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		current, _, _, err := coordinator.GetGoal(goal.ID)
+		return err == nil && current.Status == GoalCompleted
+	})
+
+	current, plan, tasks, err := coordinator.GetGoal(goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if current.Status != GoalCompleted {
+		t.Fatalf("expected completed goal, got %s", current.Status)
+	}
+	if plan == nil || len(plan.Phases) < 2 {
+		t.Fatalf("expected review phase after artifact completion, got %#v", plan)
+	}
+	if len(tasks) < 2 {
+		t.Fatalf("expected prepare and review tasks, got %d", len(tasks))
+	}
+	if tasks[0].Status != TaskCompleted {
+		t.Fatalf("expected prepare task completed, got %s", tasks[0].Status)
+	}
+	if !strings.Contains(tasks[0].Result, "Expected workspace artifacts were produced") {
+		t.Fatalf("expected synthetic completion summary, got %q", tasks[0].Result)
+	}
+}
+
+func TestSpecWorkflowHonorsGoalReviewRoundOverride(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+	cfg.Workflow.DefaultReviewRounds = 6
+	cfg.Team = []TeamMemberConfig{
+		{
+			Name:        "spec-1",
+			Provider:    "claude",
+			Role:        "spec_creator",
+			Count:       1,
+			Description: "Creates specifications",
+		},
+		{
+			Name:        "review-1",
+			Provider:    "codex",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications",
+		},
+	}
+	cfg.Agents = map[string]AgentConfig{
+		"spec-1": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-1": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+	}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"spec-1":   &scriptedAgent{name: "spec-1", responses: []string{"initial spec", "revised spec", "revised spec again"}, delay: 20 * time.Millisecond, available: true},
+		"review-1": &scriptedAgent{name: "review-1", responses: []string{"VERDICT: FAIL\n\nBLOCKERS\n- still ambiguous", "VERDICT: FAIL\n\nBLOCKERS\n- still ambiguous"}, delay: 20 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	goal, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:           "B2 spec",
+		Description:     "Create and review a technical spec document",
+		MaxReviewRounds: 2,
+	})
+	if err != nil {
+		t.Fatalf("SubmitGoal() error = %v", err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		current, _, _, err := coordinator.GetGoal(goal.ID)
+		return err == nil && current.Status == GoalBlocked
+	})
+
+	current, plan, tasks, err := coordinator.GetGoal(goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if current.Status != GoalBlocked {
+		t.Fatalf("expected blocked goal, got %s", current.Status)
+	}
+	if current.MaxReviewRounds != 2 {
+		t.Fatalf("expected goal review rounds 2, got %d", current.MaxReviewRounds)
+	}
+	if plan == nil || len(plan.Phases) != 4 {
+		t.Fatalf("expected prepare, review, amend, review phases, got %#v", plan)
+	}
+	if len(tasks) != 4 {
+		t.Fatalf("expected 4 tasks before block, got %d", len(tasks))
 	}
 }
 

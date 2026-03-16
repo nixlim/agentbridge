@@ -5,75 +5,178 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AgentBridge v2</title>
   <link rel="icon" href="data:,">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div class="shell">
-    <header class="hero">
-      <div class="hero-copy">
-        <p class="eyebrow">LLM-Brained Team Coordination</p>
-        <h1>AgentBridge v2</h1>
-        <p class="hero-text">Goals, plans, agents, and the coordinator brain in one control surface.</p>
-        <p id="workspace-path" class="workspace-path">Workspace: unknown</p>
-      </div>
-      <div class="hero-status">
-        <div id="connection-status" class="connection status-offline">disconnected</div>
-        <div class="hero-chip">
-          <span>Brain</span>
-          <strong id="brain-provider-label">unknown</strong>
-        </div>
-      </div>
-    </header>
 
-    <section class="goalbar panel">
-      <div class="goalbar-main">
-        <div>
-          <p class="eyebrow">Current Goal</p>
-          <h2 id="goal-title">No active goal</h2>
-          <p id="goal-status" class="muted">Submit a goal to start planning.</p>
+    <div class="topbar">
+      <span class="topbar-title">AgentBridge</span>
+      <div class="topbar-item">
+        <span id="connection-dot" class="topbar-dot"></span>
+        <span id="connection-label">disconnected</span>
+      </div>
+      <div class="topbar-spacer"></div>
+      <div class="topbar-item">
+        <label>Workflow</label>
+        <span id="brain-provider-label">deterministic</span>
+      </div>
+      <div class="topbar-item">
+        <label>Workspace</label>
+        <span id="workspace-path">unknown</span>
+      </div>
+    </div>
+
+    <div id="goalbar" class="goalbar empty">
+      <div class="goalbar-info">
+        <span id="goal-title" class="goalbar-title">No active goal</span>
+        <span id="goal-status" class="goalbar-status"></span>
+      </div>
+      <div class="goalbar-progress">
+        <div class="progress-track">
+          <div id="goal-progress-bar" class="progress-bar"></div>
         </div>
-        <div class="goalbar-progress">
-          <div class="progress-head">
-            <span id="goal-progress-label">0 / 0 tasks</span>
-            <span id="goal-summary" class="muted"></span>
-          </div>
-          <div class="progress-track">
-            <div id="goal-progress-bar" class="progress-bar"></div>
-          </div>
-        </div>
+        <span id="goal-progress-label" class="progress-label">0 / 0</span>
       </div>
       <div class="goalbar-actions">
-        <button id="kill-goal" type="button" class="danger-button">Kill Goal</button>
-        <button id="force-replan" type="button">Force Re-plan</button>
+        <button id="kill-goal" type="button" class="btn-danger btn-sm">Kill</button>
       </div>
-    </section>
+    </div>
 
-    <main class="layout">
-      <section class="stack">
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">New Goal</p>
-              <h2>Executive Input</h2>
+    <nav class="tabbar">
+      <button class="tab active" data-tab="overview">Overview</button>
+      <button class="tab" data-tab="plan">Plan</button>
+      <button class="tab" data-tab="tasks">Tasks <span id="tab-tasks-count" class="tab-count"></span></button>
+      <button class="tab" data-tab="messages">Messages</button>
+      <button class="tab" data-tab="workspace">Workspace</button>
+      <button class="tab" data-tab="controls">Controls</button>
+    </nav>
+
+    <div class="tab-panels">
+
+      <!-- Overview: Coordinator + Agents -->
+      <div class="tab-panel active" data-tab="overview">
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Coordinator</span>
+            <div class="section-actions">
+              <span id="brain-trigger" class="tag tag-accent">workflow</span>
             </div>
           </div>
-          <form id="goal-form" class="form-grid">
+          <div class="brain-grid">
+            <div class="brain-output">
+              <div class="brain-meta">
+                <span id="brain-invocations" class="muted" style="font-size:11px">deterministic workflow</span>
+              </div>
+              <p id="workflow-status" class="brain-status-line">No active workflow state.</p>
+              <p id="brain-process" class="brain-status-line">No active worker process telemetry yet.</p>
+              <pre id="brain-thinking">No active workflow guidance yet.</pre>
+            </div>
+            <div class="brain-output">
+              <div class="section-header" style="margin-bottom:8px">
+                <span class="section-title">Transitions</span>
+              </div>
+              <div id="brain-decisions" class="decision-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Agents</span>
+            <div class="section-actions">
+              <select id="agent-filter" class="topbar-select">
+                <option value="">All agents</option>
+              </select>
+            </div>
+          </div>
+          <div id="agents-list"></div>
+        </div>
+      </div>
+
+      <!-- Plan -->
+      <div class="tab-panel" data-tab="plan">
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Execution Plan</span>
+            <div class="section-actions">
+              <button id="toggle-plan-editor" type="button" class="btn-sm">Edit Plan</button>
+            </div>
+          </div>
+          <div id="plan-editor" class="hidden">
+            <form id="plan-form" class="form-grid" style="margin-bottom:12px">
+              <textarea id="plan-input" rows="8" placeholder='{"phases":[...]}'></textarea>
+              <button type="submit">Apply Plan Override</button>
+            </form>
+          </div>
+          <div id="plan-view"></div>
+        </div>
+      </div>
+
+      <!-- Tasks -->
+      <div class="tab-panel" data-tab="tasks">
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Work Queue</span>
+            <div class="section-actions">
+              <button id="clear-tasks" type="button" class="btn-sm">Clear Finished</button>
+            </div>
+          </div>
+          <div id="tasks-list"></div>
+        </div>
+      </div>
+
+      <!-- Messages -->
+      <div class="tab-panel" data-tab="messages">
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Timeline</span>
+            <div class="section-actions">
+              <input id="search-input" type="search" placeholder="Search..." style="width:200px">
+              <button id="clear-messages" type="button" class="btn-sm">Clear</button>
+            </div>
+          </div>
+          <div id="message-types" class="chip-bar"></div>
+          <div id="message-list" class="timeline"></div>
+        </div>
+      </div>
+
+      <!-- Workspace -->
+      <div class="tab-panel" data-tab="workspace">
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">File Tree</span>
+            <div class="section-actions">
+              <button id="refresh-workspace" type="button" class="btn-sm">Refresh</button>
+            </div>
+          </div>
+          <div id="workspace-tree" class="workspace-tree"></div>
+        </div>
+      </div>
+
+      <!-- Controls -->
+      <div class="tab-panel" data-tab="controls">
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Submit Goal</span>
+          </div>
+          <form id="goal-form" class="form-grid" style="grid-template-columns:1fr">
             <input id="goal-input-title" type="text" placeholder="Goal title">
-            <textarea id="goal-input-description" rows="4" placeholder="High-level outcome, constraints, or guidance"></textarea>
+            <textarea id="goal-input-description" rows="3" placeholder="High-level outcome, constraints, or guidance"></textarea>
+            <input id="goal-input-review-rounds" type="number" min="1" step="1" placeholder="Review rounds override (optional)">
             <button type="submit">Submit Goal</button>
           </form>
-        </section>
+        </div>
 
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Manual Actions</p>
-              <h2>Overrides</h2>
-            </div>
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Overrides</span>
           </div>
           <form id="composer-form" class="form-grid">
             <select id="send-mode">
-              <option value="brain">Message Brain</option>
               <option value="message">Message Agent</option>
               <option value="task">Create Task</option>
             </select>
@@ -81,112 +184,14 @@
             <input id="task-title" type="text" placeholder="Task title">
             <select id="review-agent"></select>
             <input id="depends-on" type="text" placeholder="Depends on task IDs (comma separated)">
-            <textarea id="composer-input" rows="4" placeholder="Message or task description"></textarea>
+            <textarea id="composer-input" rows="3" placeholder="Message or task description"></textarea>
             <button type="submit">Send</button>
           </form>
-          <div id="human-input-panel" class="callout hidden"></div>
-        </section>
+          <div id="human-input-panel" class="hidden"></div>
+        </div>
+      </div>
 
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Team</p>
-              <h2>Agents</h2>
-            </div>
-            <select id="agent-filter">
-              <option value="">All agents</option>
-            </select>
-          </div>
-          <div id="agents-list" class="card-list"></div>
-        </section>
-      </section>
-
-      <section class="stack wide">
-        <section class="panel brain-panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Coordinator Brain</p>
-              <h2>Thinking</h2>
-            </div>
-            <div class="inline-actions">
-              <select id="brain-provider-select"></select>
-              <button id="switch-brain" type="button">Switch Brain</button>
-            </div>
-          </div>
-          <div class="brain-grid">
-            <article class="brain-callout">
-              <div class="brain-meta">
-                <span id="brain-trigger" class="badge">no trigger</span>
-                <span id="brain-invocations" class="muted">0 invocations</span>
-              </div>
-              <p id="workflow-status" class="muted">No active workflow state.</p>
-              <p id="brain-process" class="muted">No brain process telemetry yet.</p>
-              <pre id="brain-thinking">No brain output yet.</pre>
-            </article>
-            <article class="brain-card">
-              <h3>Last Decisions</h3>
-              <div id="brain-decisions" class="decision-list"></div>
-            </article>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Execution Plan</p>
-              <h2>Phases</h2>
-            </div>
-            <button id="toggle-plan-editor" type="button" class="secondary-button">Edit Plan</button>
-          </div>
-          <div id="plan-editor" class="hidden">
-            <form id="plan-form" class="form-grid">
-              <textarea id="plan-input" rows="10" placeholder='{"phases":[...]}'></textarea>
-              <button type="submit">Apply Plan Override</button>
-            </form>
-          </div>
-          <div id="plan-view" class="plan-grid"></div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Timeline</p>
-              <h2>Messages</h2>
-            </div>
-            <div class="inline-actions">
-              <input id="search-input" type="search" placeholder="Search messages">
-              <button id="clear-messages" type="button" class="secondary-button">Clear Messages</button>
-            </div>
-          </div>
-          <div id="message-types" class="chips"></div>
-          <div id="message-list" class="timeline"></div>
-        </section>
-      </section>
-
-      <section class="stack">
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Workspace</p>
-              <h2>File Tree</h2>
-            </div>
-            <button id="refresh-workspace" type="button" class="secondary-button">Refresh</button>
-          </div>
-          <div id="workspace-tree" class="workspace-tree"></div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Work Queue</p>
-              <h2>Tasks</h2>
-            </div>
-            <button id="clear-tasks" type="button" class="secondary-button">Clear Finished</button>
-          </div>
-          <div id="tasks-list" class="task-groups"></div>
-        </section>
-      </section>
-    </main>
+    </div>
   </div>
 
   <script src="/static/app.js"></script>

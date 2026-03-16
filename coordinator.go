@@ -5,12 +5,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+)
+
+const (
+	defaultSpecPrepSkillPath   = "/Users/nixlim/Sync/PROJECTS/foundry_zero/myagentsgigs/.claude/skills/plan-spec"
+	defaultSpecReviewSkillPath = "/Users/nixlim/Sync/PROJECTS/foundry_zero/myagentsgigs/.claude/skills/grill-spec"
+	defaultSpecOutputDir       = "specs"
+)
+
+var (
+	workflowTickInterval       = 5 * time.Second
+	fileArtifactQuietThreshold = 90 * time.Second
 )
 
 type dispatchResult struct {
@@ -86,9 +99,8 @@ func NewCoordinator(cfg Config, agents map[string]Agent, brainAdapter Agent, wor
 }
 
 func (c *Coordinator) Start() {
-	c.wg.Add(2)
+	c.wg.Add(1)
 	go c.eventLoop()
-	go c.brainLoop()
 }
 
 func (c *Coordinator) Stop(ctx context.Context) error {
@@ -96,9 +108,6 @@ func (c *Coordinator) Stop(ctx context.Context) error {
 	c.shuttingDown = true
 	for _, cancel := range c.activeCancels {
 		cancel()
-	}
-	if c.brainCancel != nil {
-		c.brainCancel()
 	}
 	c.mu.Unlock()
 
@@ -165,7 +174,7 @@ func (c *Coordinator) RecoverFromLog() error {
 		if goal == nil {
 			continue
 		}
-		if goal.Status == GoalPlanning || goal.Status == GoalActive {
+		if goal.Status == GoalPlanning || goal.Status == GoalActive || goal.Status == GoalBlocked {
 			c.currentGoalID = goal.ID
 			break
 		}
@@ -301,17 +310,18 @@ func (c *Coordinator) SubmitGoal(req CreateGoalRequest) (*Goal, error) {
 		c.mu.Unlock()
 		return nil, errors.New("coordinator is shutting down")
 	}
-	if active := c.currentGoalLocked(); active != nil && (active.Status == GoalPlanning || active.Status == GoalActive) {
+	if active := c.currentGoalLocked(); active != nil && (active.Status == GoalPlanning || active.Status == GoalActive || active.Status == GoalBlocked) {
 		c.mu.Unlock()
 		return nil, errors.New("an active goal already exists")
 	}
 
 	goal := &Goal{
-		ID:          uuid.NewString(),
-		Title:       strings.TrimSpace(req.Title),
-		Description: strings.TrimSpace(req.Description),
-		Status:      GoalPlanning,
-		CreatedAt:   time.Now().UTC(),
+		ID:              uuid.NewString(),
+		Title:           strings.TrimSpace(req.Title),
+		Description:     strings.TrimSpace(req.Description),
+		MaxReviewRounds: c.resolveGoalReviewRounds(req.MaxReviewRounds),
+		Status:          GoalPlanning,
+		CreatedAt:       time.Now().UTC(),
 	}
 	c.goals[goal.ID] = goal
 	c.goalOrder = append(c.goalOrder, goal.ID)
@@ -559,6 +569,39 @@ func (c *Coordinator) CancelTask(taskID string) error {
 	return nil
 }
 
+func (c *Coordinator) RetryTask(taskID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	task, ok := c.tasks[taskID]
+	if !ok {
+		return errors.New("task not found")
+	}
+	if err := task.Retry(); err != nil {
+		return err
+	}
+	task.ErrorOutput = ""
+	if goal := c.goals[task.GoalID]; goal != nil && goal.Status == GoalBlocked {
+		goal.Status = GoalActive
+		goal.Summary = ""
+		goal.CompletedAt = nil
+		c.recordGoalLocked(goal, "goal resumed")
+	}
+	if state, ok := c.agentState[task.AssignedTo]; ok {
+		if agent, exists := c.agents[task.AssignedTo]; !exists || !agent.IsAvailable() {
+			state.Status = AgentOffline
+		} else {
+			state.Status = AgentIdle
+		}
+		state.CurrentTask = ""
+		state.LastActivity = time.Now().UTC()
+		c.recordAgentLocked(state, "agent reset for retry")
+	}
+	c.recordTaskLocked(task, "task retry requested")
+	c.signalDispatchLocked()
+	return nil
+}
+
 func (c *Coordinator) ApproveTask(taskID string) error {
 	c.mu.Lock()
 	followUp, err := c.acceptTaskLocked(taskID)
@@ -613,7 +656,7 @@ func (c *Coordinator) ReassignTask(taskID, newAgent, reason string) error {
 
 func (c *Coordinator) eventLoop() {
 	defer c.wg.Done()
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(workflowTickInterval)
 	defer ticker.Stop()
 
 	for {
@@ -622,6 +665,7 @@ func (c *Coordinator) eventLoop() {
 			c.handleDispatchResult(result)
 		case <-ticker.C:
 			c.reconcileTasks()
+			c.completeQuiescentFileTasks()
 		case <-c.dispatchWake:
 			c.dispatchReadyTasks()
 		case <-c.stop:
@@ -778,12 +822,16 @@ func (c *Coordinator) handleDispatchResult(dr dispatchResult) {
 	delete(c.activeCancels, dr.TaskID)
 	c.workspaceLocks.Unlock(dr.TaskID)
 
-	if task.Status == TaskCancelled {
+	if task.Status != TaskRunning {
 		if state != nil {
-			state.Status = AgentIdle
-			state.CurrentTask = ""
-			state.LastActivity = time.Now().UTC()
-			c.recordAgentLocked(state, "agent idle")
+			if state.CurrentTask == dr.TaskID {
+				state.CurrentTask = ""
+				if state.Status == AgentBusy {
+					state.Status = AgentIdle
+				}
+				state.LastActivity = time.Now().UTC()
+				c.recordAgentLocked(state, "agent idle")
+			}
 		}
 		c.mu.Unlock()
 		return
@@ -792,8 +840,11 @@ func (c *Coordinator) handleDispatchResult(dr dispatchResult) {
 	if dr.Err != nil {
 		task.RetryCount++
 		errMsg := dr.Err.Error()
+		errorOutput := extractErrorOutput(dr.Err)
+		task.ErrorOutput = errorOutput
 		agentMsg := NewMessage(MsgAgentToCoordinator, dr.AgentName, "coordinator", task.ID, errMsg)
 		agentMsg.Metadata.Error = errMsg
+		agentMsg.Metadata.RawOutput = errorOutput
 		c.appendMessageLocked(agentMsg)
 
 		if state != nil {
@@ -823,7 +874,7 @@ func (c *Coordinator) handleDispatchResult(dr dispatchResult) {
 		c.recordTaskLocked(task, "task failed")
 		if task.GoalID != "" {
 			if goal := c.goals[task.GoalID]; goal != nil {
-				c.failGoalLocked(goal, fmt.Sprintf("task %q failed: %s", task.Title, errMsg), "goal failed")
+				c.blockGoalLocked(goal, fmt.Sprintf("task %q failed: %s", task.Title, errMsg), "goal blocked")
 			}
 		}
 		c.mu.Unlock()
@@ -947,6 +998,89 @@ func (c *Coordinator) handleDispatchResult(dr dispatchResult) {
 	if followUp != nil {
 		c.enqueueBrainCycle(followUp.Trigger, followUp.Context)
 	}
+}
+
+func (c *Coordinator) completeQuiescentFileTasks() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, task := range c.tasks {
+		if task == nil || task.Status != TaskRunning || len(task.FilesTouched) == 0 {
+			continue
+		}
+		state := c.agentState[task.AssignedTo]
+		if state == nil || state.LastInvocation == nil {
+			continue
+		}
+		invocation := state.LastInvocation
+		if invocation.Status != "running" && invocation.Status != "waiting_for_exit" {
+			continue
+		}
+		if !c.outputArtifactsReadyLocked(task, invocation) {
+			continue
+		}
+		if cancel := c.activeCancels[task.ID]; cancel != nil {
+			cancel()
+			delete(c.activeCancels, task.ID)
+		}
+		c.workspaceLocks.Unlock(task.ID)
+		commitHash, filesChanged, _ := c.workspace.CommitTask(task.AssignedTo, task.Title, task.ID)
+		if err := task.Complete(c.syntheticArtifactSummary(task), filesChanged, commitHash); err != nil {
+			continue
+		}
+		if state.CurrentTask == task.ID {
+			state.CurrentTask = ""
+		}
+		state.Status = AgentIdle
+		state.TasksCompleted++
+		state.LastActivity = time.Now().UTC()
+		c.recordTaskLocked(task, "task auto-completed from workspace artifact")
+		c.recordAgentLocked(state, "agent idle after artifact completion")
+		if task.GoalID != "" {
+			if goal := c.goals[task.GoalID]; goal != nil {
+				if err := c.advanceGoalWorkflowLocked(); err != nil {
+					c.failGoalLocked(goal, fmt.Sprintf("workflow progression failed: %v", err), "goal failed")
+				}
+			}
+		}
+	}
+}
+
+func (c *Coordinator) outputArtifactsReadyLocked(task *Task, invocation *CommandTelemetry) bool {
+	if task == nil || invocation == nil || len(task.FilesTouched) == 0 {
+		return false
+	}
+	lastEvent := invocation.LastEventAt
+	if lastEvent.IsZero() {
+		lastEvent = invocation.StartedAt
+	}
+	if lastEvent.IsZero() || time.Since(lastEvent) < fileArtifactQuietThreshold {
+		return false
+	}
+	taskStart := task.CreatedAt
+	if task.StartedAt != nil {
+		taskStart = *task.StartedAt
+	}
+	for _, relPath := range task.FilesTouched {
+		info, err := os.Stat(filepath.Join(c.workspace.Path(), filepath.FromSlash(relPath)))
+		if err != nil || info.IsDir() {
+			return false
+		}
+		if info.ModTime().Before(taskStart.Add(-time.Second)) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Coordinator) syntheticArtifactSummary(task *Task) string {
+	if task == nil || len(task.FilesTouched) == 0 {
+		return "Expected workspace artifacts were produced; coordinator advanced after the worker stopped reporting progress."
+	}
+	return fmt.Sprintf(
+		"Expected workspace artifacts were produced (%s); coordinator advanced after the worker stopped reporting progress.",
+		strings.Join(task.FilesTouched, ", "),
+	)
 }
 
 func (c *Coordinator) shouldUseBrainForTaskLocked(task *Task) bool {
@@ -1562,7 +1696,6 @@ func (c *Coordinator) snapshotLocked() map[string]interface{} {
 		"goals":        goals,
 		"current_goal": currentGoal,
 		"plan":         c.brainState.CurrentPlan,
-		"brain":        c.brainState,
 		"workflow":     c.workflowStateLocked(),
 		"workspace": map[string]interface{}{
 			"path": c.workspace.Path(),
@@ -1838,11 +1971,17 @@ func (c *Coordinator) advanceGoalWorkflowLocked() error {
 	if goal == nil || c.planExecutor == nil || c.brainState.CurrentPlan == nil {
 		return nil
 	}
+	if goal.Status == GoalBlocked || goal.Status == GoalFailed || goal.Status == GoalCompleted {
+		return nil
+	}
 
 	phaseIndex := c.planExecutor.currentPhase
 	if phaseIndex >= 0 && phaseIndex < len(c.brainState.CurrentPlan.Phases) {
 		if !c.phaseTasksCompleteLocked(phaseIndex) {
 			return nil
+		}
+		if handled, err := c.handleCompletedPhaseLocked(goal, phaseIndex); handled || err != nil {
+			return err
 		}
 	}
 
@@ -1863,9 +2002,9 @@ func (c *Coordinator) advanceGoalWorkflowLocked() error {
 
 func (c *Coordinator) workflowStateLocked() WorkflowState {
 	state := WorkflowState{
-		Mode:        "deterministic",
-		PlannerMode: c.workflowPlannerModeLocked(),
-		Status:      "idle",
+		Mode:   "deterministic",
+		Recipe: "spec-review-loop",
+		Status: "idle",
 	}
 
 	goal := c.currentGoalLocked()
@@ -1886,6 +2025,13 @@ func (c *Coordinator) workflowStateLocked() WorkflowState {
 	phase := c.brainState.CurrentPlan.Phases[phaseIndex]
 	state.CurrentPhaseNumber = phase.Number
 	state.CurrentPhaseTitle = phase.Title
+	state.Stage = c.workflowStageForPhase(phase)
+	state.StageDetail = phase.Description
+	state.ReviewRound = c.extractReviewRound(phase.Title)
+	state.MaxReviewRounds = c.goalReviewRoundsLocked(goal)
+	if goal.Summary != "" && (goal.Status == GoalBlocked || goal.Status == GoalFailed) {
+		state.LastError = goal.Summary
+	}
 
 	if goal.Status == GoalActive {
 		if c.phaseTasksCompleteLocked(phaseIndex) {
@@ -1896,17 +2042,6 @@ func (c *Coordinator) workflowStateLocked() WorkflowState {
 	}
 
 	return state
-}
-
-func (c *Coordinator) workflowPlannerModeLocked() string {
-	switch c.config.Brain.PlanningStyle {
-	case "manual":
-		return "manual"
-	case "boundary", "upfront", "rolling":
-		return "boundary"
-	default:
-		return "disabled"
-	}
 }
 
 func (c *Coordinator) phaseTasksCompleteLocked(phaseIndex int) bool {
@@ -1923,6 +2058,154 @@ func (c *Coordinator) phaseTasksCompleteLocked(phaseIndex int) bool {
 		}
 	}
 	return true
+}
+
+func (c *Coordinator) handleCompletedPhaseLocked(goal *Goal, phaseIndex int) (bool, error) {
+	if goal == nil || c.brainState.CurrentPlan == nil || phaseIndex < 0 || phaseIndex >= len(c.brainState.CurrentPlan.Phases) {
+		return false, nil
+	}
+	phase := c.brainState.CurrentPlan.Phases[phaseIndex]
+	if c.workflowStageForPhase(phase) != "adversarial_review" {
+		return false, nil
+	}
+	reviewTask := c.firstTaskForPhaseLocked(phase)
+	if reviewTask == nil {
+		return false, fmt.Errorf("review phase %q completed without a task", phase.Title)
+	}
+	if reviewApproves(reviewTask.Result) {
+		c.completeCurrentGoalLocked(fmt.Sprintf("Specification %q passed adversarial review after %d round(s).", goal.Title, max(1, c.extractReviewRound(phase.Title))))
+		return true, nil
+	}
+	round := max(1, c.extractReviewRound(phase.Title))
+	if round >= c.goalReviewRoundsLocked(goal) {
+		c.blockGoalLocked(goal, fmt.Sprintf("specification review did not pass after %d rounds: %s", round, strings.TrimSpace(reviewTask.Result)), "goal blocked")
+		return true, nil
+	}
+	if err := c.appendSpecRevisionRoundLocked(goal, round+1, reviewTask.ID); err != nil {
+		return true, err
+	}
+	nextPhase := c.nextUnexecutedPhaseLocked()
+	if nextPhase >= 0 {
+		if err := c.planExecutor.ExecutePhase(c, nextPhase); err != nil {
+			return true, err
+		}
+		c.signalDispatchLocked()
+	}
+	return true, nil
+}
+
+func (c *Coordinator) appendSpecRevisionRoundLocked(goal *Goal, round int, reviewTaskID string) error {
+	if goal == nil || c.brainState.CurrentPlan == nil {
+		return errors.New("cannot append revision round without an active plan")
+	}
+	primary := c.choosePrimaryRoleLocked(goal)
+	reviewer := c.chooseReviewerRoleLocked(primary)
+	if primary == "" || reviewer == "" {
+		return errors.New("spec workflow requires both spec_creator and reviewer roles")
+	}
+	specPath := c.specOutputPath(goal)
+	baseTitle := c.normalizedGoalTitle(goal)
+	amendTempID := fmt.Sprintf("amend-spec-r%d", round-1)
+	reviewTempID := fmt.Sprintf("review-spec-r%d", round)
+	currentPhaseCount := len(c.brainState.CurrentPlan.Phases)
+	c.brainState.CurrentPlan.Phases = append(c.brainState.CurrentPlan.Phases,
+		Phase{
+			Number:      currentPhaseCount + 1,
+			Title:       fmt.Sprintf("Amend Spec Round %d", round-1),
+			Description: "Address every finding from the prior adversarial review.",
+			Tasks: []PlannedTask{{
+				TempID:       amendTempID,
+				Title:        fmt.Sprintf("Amend %s Specification Round %d", baseTitle, round-1),
+				Description:  c.buildSpecAmendTaskDescription(goal, specPath, round-1),
+				AssignTo:     primary,
+				DependsOn:    []string{c.findPhaseTempIDForTaskLocked(reviewTaskID)},
+				Priority:     1,
+				FilesTouched: []string{specPath},
+			}},
+		},
+		Phase{
+			Number:      currentPhaseCount + 2,
+			Title:       fmt.Sprintf("Adversarial Review Round %d", round),
+			Description: "Re-review the amended specification and confirm all issues are resolved.",
+			Tasks: []PlannedTask{{
+				TempID:      reviewTempID,
+				Title:       fmt.Sprintf("Adversarial Review %s Round %d", baseTitle, round),
+				Description: c.buildSpecReviewTaskDescription(goal, specPath, round),
+				AssignTo:    reviewer,
+				DependsOn:   []string{amendTempID},
+				Priority:    1,
+			}},
+		},
+	)
+	c.recordPlanLocked(c.brainState.CurrentPlan, "coordinator", fmt.Sprintf("appended review round %d", round))
+	return nil
+}
+
+func (c *Coordinator) findPhaseTempIDForTaskLocked(taskID string) string {
+	if c.brainState.CurrentPlan == nil {
+		return ""
+	}
+	for _, phase := range c.brainState.CurrentPlan.Phases {
+		for _, planned := range phase.Tasks {
+			if planned.RealTaskID == taskID {
+				return planned.TempID
+			}
+		}
+	}
+	return ""
+}
+
+func (c *Coordinator) firstTaskForPhaseLocked(phase Phase) *Task {
+	for _, planned := range phase.Tasks {
+		if planned.RealTaskID == "" {
+			continue
+		}
+		if task := c.tasks[planned.RealTaskID]; task != nil {
+			return task
+		}
+	}
+	return nil
+}
+
+func (c *Coordinator) workflowStageForPhase(phase Phase) string {
+	title := strings.ToLower(phase.Title)
+	switch {
+	case strings.Contains(title, "prepare spec"):
+		return "preparing_spec"
+	case strings.Contains(title, "adversarial review"):
+		return "adversarial_review"
+	case strings.Contains(title, "amend spec"):
+		return "amending_spec"
+	case strings.Contains(title, "review"):
+		return "reviewing"
+	case strings.Contains(title, "draft"):
+		return "drafting"
+	default:
+		return "executing"
+	}
+}
+
+func (c *Coordinator) extractReviewRound(title string) int {
+	lower := strings.ToLower(title)
+	idx := strings.LastIndex(lower, "round ")
+	if idx < 0 {
+		return 0
+	}
+	value := strings.TrimSpace(lower[idx+len("round "):])
+	for i, r := range value {
+		if r < '0' || r > '9' {
+			value = value[:i]
+			break
+		}
+	}
+	if value == "" {
+		return 0
+	}
+	round := 0
+	for _, r := range value {
+		round = round*10 + int(r-'0')
+	}
+	return round
 }
 
 func (c *Coordinator) allPlannedTasksCompletedLocked() bool {
@@ -1949,65 +2232,31 @@ func (c *Coordinator) buildDeterministicPlanLocked(goal *Goal) (*Plan, error) {
 		return nil, errors.New("no suitable primary agent or role found")
 	}
 	reviewer := c.chooseReviewerRoleLocked(primary)
-
-	baseTitle := strings.TrimSpace(goal.Title)
-	if baseTitle == "" {
-		baseTitle = "goal"
+	if primary == "spec_creator" && reviewer == "" {
+		return nil, errors.New("spec workflow requires at least one reviewer agent")
+	}
+	if reviewer != "" && primary == "spec_creator" {
+		return c.buildSpecWorkflowPlanLocked(goal, primary, reviewer), nil
 	}
 
-	phases := []Phase{
-		{
-			Number:      1,
-			Title:       "Draft",
-			Description: "Create the primary deliverable for the goal.",
-			Tasks: []PlannedTask{
-				{
+	baseTitle := c.normalizedGoalTitle(goal)
+	return &Plan{
+		GoalID: goal.ID,
+		Phases: []Phase{
+			{
+				Number:      1,
+				Title:       "Draft",
+				Description: "Create the primary deliverable for the goal.",
+				Tasks: []PlannedTask{{
 					TempID:      "draft",
 					Title:       fmt.Sprintf("Draft %s", baseTitle),
 					Description: c.buildDraftTaskDescription(goal),
 					AssignTo:    primary,
 					Priority:    1,
-				},
+				}},
 			},
 		},
-	}
-
-	if reviewer != "" {
-		phases = append(phases,
-			Phase{
-				Number:      2,
-				Title:       "Review",
-				Description: "Review the draft deliverable and identify concrete issues.",
-				Tasks: []PlannedTask{
-					{
-						TempID:      "review",
-						Title:       fmt.Sprintf("Review %s", baseTitle),
-						Description: c.buildReviewTaskDescription(goal),
-						AssignTo:    reviewer,
-						DependsOn:   []string{"draft"},
-						Priority:    1,
-					},
-				},
-			},
-			Phase{
-				Number:      3,
-				Title:       "Revise",
-				Description: "Incorporate review feedback and finalize the deliverable.",
-				Tasks: []PlannedTask{
-					{
-						TempID:      "revise",
-						Title:       fmt.Sprintf("Revise %s", baseTitle),
-						Description: c.buildReviseTaskDescription(goal),
-						AssignTo:    primary,
-						DependsOn:   []string{"review"},
-						Priority:    1,
-					},
-				},
-			},
-		)
-	}
-
-	return &Plan{GoalID: goal.ID, Phases: phases}, nil
+	}, nil
 }
 
 func (c *Coordinator) choosePrimaryRoleLocked(goal *Goal) string {
@@ -2041,6 +2290,42 @@ func (c *Coordinator) chooseReviewerRoleLocked(primary string) string {
 	return "reviewer"
 }
 
+func (c *Coordinator) buildSpecWorkflowPlanLocked(goal *Goal, primary string, reviewer string) *Plan {
+	baseTitle := c.normalizedGoalTitle(goal)
+	specPath := c.specOutputPath(goal)
+	return &Plan{
+		GoalID: goal.ID,
+		Phases: []Phase{
+			{
+				Number:      1,
+				Title:       "Prepare Spec",
+				Description: "Create the implementation-ready specification from the provided technical documents.",
+				Tasks: []PlannedTask{{
+					TempID:       "prepare-spec-r1",
+					Title:        fmt.Sprintf("Prepare %s Specification", baseTitle),
+					Description:  c.buildSpecPreparationTaskDescription(goal, specPath),
+					AssignTo:     primary,
+					Priority:     1,
+					FilesTouched: []string{specPath},
+				}},
+			},
+			{
+				Number:      2,
+				Title:       "Adversarial Review Round 1",
+				Description: "Critique the specification for ambiguity, missing assumptions, and implementation gaps.",
+				Tasks: []PlannedTask{{
+					TempID:      "review-spec-r1",
+					Title:       fmt.Sprintf("Adversarial Review %s Round 1", baseTitle),
+					Description: c.buildSpecReviewTaskDescription(goal, specPath, 1),
+					AssignTo:    reviewer,
+					DependsOn:   []string{"prepare-spec-r1"},
+					Priority:    1,
+				}},
+			},
+		},
+	}
+}
+
 func (c *Coordinator) roleExistsLocked(role string) bool {
 	for _, state := range c.agentState {
 		if state.Role == role {
@@ -2048,6 +2333,31 @@ func (c *Coordinator) roleExistsLocked(role string) bool {
 		}
 	}
 	return false
+}
+
+func (c *Coordinator) normalizedGoalTitle(goal *Goal) string {
+	baseTitle := strings.TrimSpace(goal.Title)
+	if baseTitle == "" {
+		baseTitle = "goal"
+	}
+	return baseTitle
+}
+
+func (c *Coordinator) resolveGoalReviewRounds(requested int) int {
+	if requested > 0 {
+		return requested
+	}
+	if c.config.Workflow.DefaultReviewRounds > 0 {
+		return c.config.Workflow.DefaultReviewRounds
+	}
+	return 6
+}
+
+func (c *Coordinator) goalReviewRoundsLocked(goal *Goal) int {
+	if goal != nil && goal.MaxReviewRounds > 0 {
+		return goal.MaxReviewRounds
+	}
+	return c.resolveGoalReviewRounds(0)
 }
 
 func (c *Coordinator) buildDraftTaskDescription(goal *Goal) string {
@@ -2069,11 +2379,72 @@ func (c *Coordinator) buildReviewTaskDescription(goal *Goal) string {
 	}, "\n\n"))
 }
 
-func (c *Coordinator) buildReviseTaskDescription(goal *Goal) string {
+func (c *Coordinator) specOutputPath(goal *Goal) string {
+	slug := strings.ToLower(strings.TrimSpace(goal.Title))
+	if slug == "" {
+		slug = "spec"
+	}
+	slug = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case r == ' ' || r == '-' || r == '_':
+			return '-'
+		default:
+			return -1
+		}
+	}, slug)
+	slug = strings.Trim(strings.Join(strings.FieldsFunc(slug, func(r rune) bool { return r == '-' }), "-"), "-")
+	if slug == "" {
+		slug = "spec"
+	}
+	return filepath.ToSlash(filepath.Join(defaultSpecOutputDir, slug+"-spec.md"))
+}
+
+func (c *Coordinator) buildSpecPreparationTaskDescription(goal *Goal, specPath string) string {
 	return strings.TrimSpace(strings.Join([]string{
-		"Revise the deliverable using the dependency context from the review task.",
+		"Prepare an implementation-ready specification from the supplied technical materials.",
+		fmt.Sprintf("Use the plan-spec skill located at: %s", defaultSpecPrepSkillPath),
+		fmt.Sprintf("Write the specification to this workspace path: %s", specPath),
+		"Create the directory if needed. The file must be markdown.",
+		"Use the technical documents and constraints in the goal details as source inputs.",
+		"Your output must leave the spec ready for adversarial review by another agent.",
+		"At the end, summarize the output path, major assumptions addressed, and any remaining open questions.",
 		fmt.Sprintf("Goal title: %s", goal.Title),
-		"Apply the review feedback, update the workspace artifacts, and provide a final summary.",
+		"Goal details:",
+		goal.Description,
+	}, "\n\n"))
+}
+
+func (c *Coordinator) buildSpecReviewTaskDescription(goal *Goal, specPath string, round int) string {
+	return strings.TrimSpace(strings.Join([]string{
+		fmt.Sprintf("Perform adversarial review round %d on the prepared specification.", round),
+		fmt.Sprintf("Use the grill-spec skill located at: %s", defaultSpecReviewSkillPath),
+		fmt.Sprintf("Review this workspace file only: %s", specPath),
+		"Assume the spec will be handed to an AI coding agent. Your job is to find every ambiguity, hidden assumption, missing edge case, missing acceptance criterion, and any unanswered engineering question.",
+		"Return a strict review report starting with exactly one of these first lines:",
+		"VERDICT: PASS",
+		"VERDICT: FAIL",
+		"If the verdict is FAIL, include sections named BLOCKERS, AMBIGUITIES, ASSUMPTIONS, QUESTIONS, and OPERABILITY GAPS.",
+		"If the verdict is PASS, explicitly state that the spec has no unaddressed ambiguities or unanswered questions for an AI coding agent.",
+		fmt.Sprintf("Goal title: %s", goal.Title),
+	}, "\n\n"))
+}
+
+func (c *Coordinator) buildSpecAmendTaskDescription(goal *Goal, specPath string, round int) string {
+	return strings.TrimSpace(strings.Join([]string{
+		fmt.Sprintf("Amend the specification after adversarial review round %d.", round),
+		fmt.Sprintf("Use the plan-spec skill located at: %s", defaultSpecPrepSkillPath),
+		fmt.Sprintf("Update this workspace file in place: %s", specPath),
+		"Use the dependency context from the previous review task as the authoritative list of issues to resolve.",
+		"Address every blocker, ambiguity, assumption, and unanswered question raised by the reviewer.",
+		"If any item cannot be fully resolved from the source materials, document it explicitly in the spec and in your summary.",
+		"At the end, provide a concise issue-by-issue resolution summary so the next review round can verify each change.",
+		fmt.Sprintf("Goal title: %s", goal.Title),
+		"Goal details:",
+		goal.Description,
 	}, "\n\n"))
 }
 
@@ -2090,6 +2461,16 @@ func (c *Coordinator) failGoalLocked(goal *Goal, summary string, content string)
 	}
 	c.brainState.PendingHumanInput = nil
 	c.recordGoalLocked(goal, firstNonEmpty(content, "goal failed"))
+}
+
+func (c *Coordinator) blockGoalLocked(goal *Goal, summary string, content string) {
+	if goal == nil {
+		return
+	}
+	goal.Status = GoalBlocked
+	goal.Summary = summary
+	goal.CompletedAt = nil
+	c.recordGoalLocked(goal, firstNonEmpty(content, "goal blocked"))
 }
 
 func (c *Coordinator) detectIntegrationConflictLocked(task *Task, filesChanged []string) string {
@@ -2149,7 +2530,35 @@ func containsAny(text string, needles ...string) bool {
 
 func reviewApproves(summary string) bool {
 	text := strings.ToLower(summary)
-	return containsAny(text, "approve", "approved", "lgtm", "looks good", "ship it", "no issues")
+	switch {
+	case strings.Contains(text, "verdict: pass"):
+		return true
+	case strings.Contains(text, "verdict: fail"):
+		return false
+	default:
+		return containsAny(text, "approved with no blockers", "no blocking issues", "no unaddressed ambiguities", "ready for implementation")
+	}
+}
+
+func extractErrorOutput(err error) string {
+	if err == nil {
+		return ""
+	}
+	var commandErr *CommandExecutionError
+	if errors.As(err, &commandErr) {
+		return strings.TrimSpace(strings.Join([]string{
+			strings.TrimSpace(commandErr.Stdout),
+			strings.TrimSpace(commandErr.Stderr),
+		}, "\n"))
+	}
+	return ""
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func humanMessageTaskTitle(agentName, content string) string {

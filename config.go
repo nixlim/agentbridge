@@ -15,6 +15,7 @@ import (
 type Config struct {
 	Server    ServerConfig              `yaml:"server" json:"server"`
 	Workspace WorkspaceConfig           `yaml:"workspace" json:"workspace"`
+	Workflow  WorkflowConfig            `yaml:"workflow" json:"workflow"`
 	Brain     BrainConfig               `yaml:"brain" json:"brain"`
 	Team      []TeamMemberConfig        `yaml:"team" json:"team"`
 	Providers map[string]ProviderConfig `yaml:"providers" json:"providers"`
@@ -30,6 +31,10 @@ type ServerConfig struct {
 type WorkspaceConfig struct {
 	Path    string `yaml:"path" json:"path"`
 	InitGit bool   `yaml:"init_git" json:"init_git"`
+}
+
+type WorkflowConfig struct {
+	DefaultReviewRounds int `yaml:"default_review_rounds" json:"default_review_rounds"`
 }
 
 type BrainConfig struct {
@@ -91,11 +96,14 @@ func DefaultConfig() Config {
 			Path:    "./workspace",
 			InitGit: true,
 		},
+		Workflow: WorkflowConfig{
+			DefaultReviewRounds: 6,
+		},
 		Brain: BrainConfig{
 			Provider:           "claude",
 			Command:            "claude",
 			Args:               []string{"--output-format", "json", "--verbose"},
-			TimeoutSeconds:     300,
+			TimeoutSeconds:     900,
 			SystemPromptFile:   "./brain_system_prompt.md",
 			MaxContextMessages: 50,
 			PlanningStyle:      "deterministic",
@@ -104,7 +112,7 @@ func DefaultConfig() Config {
 			"claude": {
 				Command:        "claude",
 				Args:           []string{"--dangerously-skip-permissions", "--output-format", "json", "--verbose"},
-				TimeoutSeconds: 300,
+				TimeoutSeconds: 900,
 				MaxRetries:     2,
 				WorkingDir:     "",
 				Env: map[string]string{
@@ -114,7 +122,7 @@ func DefaultConfig() Config {
 			"codex": {
 				Command:        "codex",
 				Args:           []string{"exec", "--full-auto"},
-				TimeoutSeconds: 300,
+				TimeoutSeconds: 900,
 				MaxRetries:     2,
 				WorkingDir:     "",
 				Env:            map[string]string{},
@@ -140,7 +148,7 @@ func DefaultConfig() Config {
 			"claude": providerToAgentConfig(ProviderConfig{
 				Command:        "claude",
 				Args:           []string{"--dangerously-skip-permissions", "--output-format", "json", "--verbose"},
-				TimeoutSeconds: 300,
+				TimeoutSeconds: 900,
 				MaxRetries:     2,
 				Env: map[string]string{
 					"CLAUDE_CODE_MAX_TURNS": "50",
@@ -149,7 +157,7 @@ func DefaultConfig() Config {
 			"codex": providerToAgentConfig(ProviderConfig{
 				Command:        "codex",
 				Args:           []string{"exec", "--full-auto"},
-				TimeoutSeconds: 300,
+				TimeoutSeconds: 900,
 				MaxRetries:     2,
 				Env:            map[string]string{},
 			}),
@@ -197,6 +205,9 @@ func LoadConfig(opts CLIOptions) (Config, error) {
 	if opts.LogLevel != "" {
 		cfg.Log.Level = opts.LogLevel
 	}
+	if cfg.Workflow.DefaultReviewRounds <= 0 {
+		cfg.Workflow.DefaultReviewRounds = 6
+	}
 
 	cfg.Workspace.Path = cleanPath(cfg.Workspace.Path)
 	cfg.Log.File = cleanPath(cfg.Log.File)
@@ -241,7 +252,7 @@ func LoadConfig(opts CLIOptions) (Config, error) {
 		cfg.Brain.Args = removeArg(cfg.Brain.Args, "-p")
 	}
 	if cfg.Brain.TimeoutSeconds <= 0 {
-		cfg.Brain.TimeoutSeconds = int((5 * time.Minute).Seconds())
+		cfg.Brain.TimeoutSeconds = int((15 * time.Minute).Seconds())
 	}
 	if cfg.Brain.MaxContextMessages <= 0 {
 		cfg.Brain.MaxContextMessages = 50
@@ -356,7 +367,7 @@ func removeArg(args []string, target string) []string {
 func normalizeProviders(providers map[string]ProviderConfig) {
 	for name, providerCfg := range providers {
 		if providerCfg.TimeoutSeconds <= 0 {
-			providerCfg.TimeoutSeconds = int((5 * time.Minute).Seconds())
+			providerCfg.TimeoutSeconds = int((15 * time.Minute).Seconds())
 		}
 		if providerCfg.MaxRetries < 0 {
 			providerCfg.MaxRetries = 0
