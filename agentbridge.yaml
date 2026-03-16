@@ -41,14 +41,20 @@ team:
   - name: "spec-creator-claude"
     provider: "claude"
     role: "spec_creator"
-    count: 3
+    count: 1
     description: "Creates and refines technical specifications, implementation plans, acceptance criteria, and task breakdowns."
 
   - name: "reviewer-codex"
     provider: "codex"
     role: "reviewer"
-    count: 2
+    count: 1
     description: "Reviews specifications for clarity, consistency, missing edge cases, feasibility, and testability."
+
+  - name: "reviewer-claude"
+    provider: "claude"
+    role: "reviewer"
+    count: 1
+    description: "Performs adversarial spec review from a second model perspective and challenges assumptions."
 
 log:
   file: "./agentbridge.log"

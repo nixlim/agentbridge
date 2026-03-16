@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -139,10 +140,6 @@ func (c *Coordinator) RecoverFromLog() error {
 		c.messages = append(c.messages, msg)
 		if msg.Metadata.Task != nil {
 			task := msg.Metadata.Task.Clone()
-			if task.Status == TaskRunning {
-				task.Status = TaskPending
-				task.StartedAt = nil
-			}
 			c.tasks[task.ID] = task
 			if !containsString(c.taskOrder, task.ID) {
 				c.taskOrder = append(c.taskOrder, task.ID)
@@ -150,10 +147,6 @@ func (c *Coordinator) RecoverFromLog() error {
 		}
 		if msg.Metadata.Agent != nil {
 			agent := *msg.Metadata.Agent
-			if agent.Status == AgentBusy {
-				agent.Status = AgentIdle
-				agent.CurrentTask = ""
-			}
 			c.agentState[agent.Name] = &agent
 		}
 		if msg.Metadata.Goal != nil {
@@ -178,6 +171,31 @@ func (c *Coordinator) RecoverFromLog() error {
 			c.currentGoalID = goal.ID
 			break
 		}
+	}
+	for _, taskID := range c.taskOrder {
+		task := c.tasks[taskID]
+		if task == nil || task.Status != TaskRunning {
+			continue
+		}
+		if c.recoveredTaskStillActiveLocked(task) {
+			continue
+		}
+		task.Status = TaskPending
+		task.StartedAt = nil
+		task.Result = firstNonEmpty(task.Result, "recovered task was re-queued because the previous worker process was not active")
+	}
+	for name, state := range c.agentState {
+		if state == nil || state.Status != AgentBusy {
+			continue
+		}
+		task := c.tasks[state.CurrentTask]
+		if task != nil && task.Status == TaskRunning && c.recoveredTaskStillActiveLocked(task) {
+			continue
+		}
+		state.Status = AgentIdle
+		state.CurrentTask = ""
+		state.LastActivity = time.Now().UTC()
+		c.agentState[name] = state
 	}
 	return nil
 }
@@ -666,6 +684,7 @@ func (c *Coordinator) eventLoop() {
 		case <-ticker.C:
 			c.reconcileTasks()
 			c.completeQuiescentFileTasks()
+			c.requeueRecoveredStaleRunningTasks()
 		case <-c.dispatchWake:
 			c.dispatchReadyTasks()
 		case <-c.stop:
@@ -731,7 +750,23 @@ func (c *Coordinator) dispatchReadyTasks() {
 		if task == nil || (task.Status != TaskPending && task.Status != TaskBlocked) {
 			continue
 		}
+		agent, exists := c.agents[task.AssignedTo]
 		state, ok := c.agentState[task.AssignedTo]
+		if !exists || agent == nil {
+			if !ok {
+				continue
+			}
+			state.Status = AgentOffline
+			state.CurrentTask = ""
+			state.LastActivity = time.Now().UTC()
+			if task.Status != TaskBlocked {
+				_ = task.SetBlocked()
+				task.Result = "assigned agent is unavailable in the current runtime"
+				c.recordTaskLocked(task, "waiting for assigned agent to become available")
+			}
+			c.recordAgentLocked(state, "agent offline")
+			continue
+		}
 		if !ok || state.Status == AgentOffline || state.Status == AgentError || state.Status == AgentBusy || state.Status == AgentPaused {
 			continue
 		}
@@ -769,6 +804,22 @@ func (c *Coordinator) dispatchReadyTasks() {
 func (c *Coordinator) runTaskLocked(task *Task) {
 	agent := c.agents[task.AssignedTo]
 	state := c.agentState[task.AssignedTo]
+	if agent == nil {
+		if state != nil {
+			state.Status = AgentOffline
+			state.CurrentTask = ""
+			state.LastActivity = time.Now().UTC()
+			c.recordAgentLocked(state, "agent offline")
+		}
+		_ = task.Fail("assigned agent is unavailable in the current runtime")
+		c.recordTaskLocked(task, "task failed")
+		if task.GoalID != "" {
+			if goal := c.goals[task.GoalID]; goal != nil {
+				c.blockGoalLocked(goal, fmt.Sprintf("task %q cannot start because assigned agent %q is unavailable", task.Title, task.AssignedTo), "goal blocked")
+			}
+		}
+		return
+	}
 	forwarded := append([]string(nil), c.pendingInbox[task.AssignedTo]...)
 	c.pendingInbox[task.AssignedTo] = nil
 	prompt := c.buildAgentPromptLocked(task, state, forwarded)
@@ -1044,6 +1095,68 @@ func (c *Coordinator) completeQuiescentFileTasks() {
 			}
 		}
 	}
+}
+
+func (c *Coordinator) requeueRecoveredStaleRunningTasks() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	requeued := false
+	for _, task := range c.tasks {
+		if task == nil || task.Status != TaskRunning {
+			continue
+		}
+		if _, launchedHere := c.activeCancels[task.ID]; launchedHere {
+			continue
+		}
+		if c.recoveredTaskStillActiveLocked(task) {
+			continue
+		}
+		task.Status = TaskPending
+		task.StartedAt = nil
+		task.Result = "recovered task was re-queued after stale process detection"
+		c.recordTaskLocked(task, "recovered task re-queued after stale process detection")
+		if state := c.agentState[task.AssignedTo]; state != nil {
+			state.Status = AgentIdle
+			state.CurrentTask = ""
+			state.LastActivity = time.Now().UTC()
+			c.recordAgentLocked(state, "agent reset after stale recovery")
+		}
+		requeued = true
+	}
+	if requeued {
+		c.signalDispatchLocked()
+	}
+}
+
+func (c *Coordinator) recoveredTaskStillActiveLocked(task *Task) bool {
+	if task == nil {
+		return false
+	}
+	state := c.agentState[task.AssignedTo]
+	if state == nil || state.LastInvocation == nil {
+		return false
+	}
+	invocation := state.LastInvocation
+	switch invocation.Status {
+	case "succeeded", "failed", "timed_out", "cancelled", "start_failed":
+		return false
+	}
+	if invocation.PID <= 0 || !processExists(invocation.PID) {
+		return false
+	}
+	startedAt := invocation.StartedAt
+	if startedAt.IsZero() && task.StartedAt != nil {
+		startedAt = *task.StartedAt
+	}
+	if startedAt.IsZero() {
+		startedAt = task.CreatedAt
+	}
+	timeout := time.Duration(invocation.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	return time.Since(startedAt) <= timeout+30*time.Second
 }
 
 func (c *Coordinator) outputArtifactsReadyLocked(task *Task, invocation *CommandTelemetry) bool {
@@ -2068,20 +2181,33 @@ func (c *Coordinator) handleCompletedPhaseLocked(goal *Goal, phaseIndex int) (bo
 	if c.workflowStageForPhase(phase) != "adversarial_review" {
 		return false, nil
 	}
-	reviewTask := c.firstTaskForPhaseLocked(phase)
-	if reviewTask == nil {
+	reviewTasks := c.tasksForPhaseLocked(phase)
+	if len(reviewTasks) == 0 {
 		return false, fmt.Errorf("review phase %q completed without a task", phase.Title)
 	}
-	if reviewApproves(reviewTask.Result) {
+	allPassed := true
+	failedSummaries := make([]string, 0, len(reviewTasks))
+	reviewTaskIDs := make([]string, 0, len(reviewTasks))
+	for _, reviewTask := range reviewTasks {
+		reviewTaskIDs = append(reviewTaskIDs, reviewTask.ID)
+		if reviewApproves(reviewTask.Result) {
+			continue
+		}
+		allPassed = false
+		if summary := strings.TrimSpace(reviewTask.Result); summary != "" {
+			failedSummaries = append(failedSummaries, summary)
+		}
+	}
+	if allPassed {
 		c.completeCurrentGoalLocked(fmt.Sprintf("Specification %q passed adversarial review after %d round(s).", goal.Title, max(1, c.extractReviewRound(phase.Title))))
 		return true, nil
 	}
 	round := max(1, c.extractReviewRound(phase.Title))
 	if round >= c.goalReviewRoundsLocked(goal) {
-		c.blockGoalLocked(goal, fmt.Sprintf("specification review did not pass after %d rounds: %s", round, strings.TrimSpace(reviewTask.Result)), "goal blocked")
+		c.blockGoalLocked(goal, fmt.Sprintf("specification review did not pass after %d rounds: %s", round, strings.TrimSpace(strings.Join(failedSummaries, "\n\n---\n\n"))), "goal blocked")
 		return true, nil
 	}
-	if err := c.appendSpecRevisionRoundLocked(goal, round+1, reviewTask.ID); err != nil {
+	if err := c.appendSpecRevisionRoundLocked(goal, round+1, reviewTaskIDs); err != nil {
 		return true, err
 	}
 	nextPhase := c.nextUnexecutedPhaseLocked()
@@ -2094,31 +2220,47 @@ func (c *Coordinator) handleCompletedPhaseLocked(goal *Goal, phaseIndex int) (bo
 	return true, nil
 }
 
-func (c *Coordinator) appendSpecRevisionRoundLocked(goal *Goal, round int, reviewTaskID string) error {
+func (c *Coordinator) appendSpecRevisionRoundLocked(goal *Goal, round int, reviewTaskIDs []string) error {
 	if goal == nil || c.brainState.CurrentPlan == nil {
 		return errors.New("cannot append revision round without an active plan")
 	}
 	primary := c.choosePrimaryRoleLocked(goal)
-	reviewer := c.chooseReviewerRoleLocked(primary)
-	if primary == "" || reviewer == "" {
-		return errors.New("spec workflow requires both spec_creator and reviewer roles")
+	reviewers := c.chooseReviewerAgentsLocked(primary, 2)
+	if primary == "" || len(reviewers) < 2 {
+		return errors.New("spec workflow requires one spec_creator and two reviewers")
 	}
 	specPath := c.specOutputPath(goal)
 	baseTitle := c.normalizedGoalTitle(goal)
-	amendTempID := fmt.Sprintf("amend-spec-r%d", round-1)
-	reviewTempID := fmt.Sprintf("review-spec-r%d", round)
+	consolidateTempID := fmt.Sprintf("consolidate-spec-r%d", round-1)
 	currentPhaseCount := len(c.brainState.CurrentPlan.Phases)
+	dependsOn := make([]string, 0, len(reviewTaskIDs))
+	for _, reviewTaskID := range reviewTaskIDs {
+		if tempID := c.findPhaseTempIDForTaskLocked(reviewTaskID); tempID != "" {
+			dependsOn = append(dependsOn, tempID)
+		}
+	}
+	reviewTasks := make([]PlannedTask, 0, len(reviewers))
+	for i, reviewer := range reviewers {
+		reviewTasks = append(reviewTasks, PlannedTask{
+			TempID:      fmt.Sprintf("review-spec-r%d-%d", round, i+1),
+			Title:       fmt.Sprintf("Adversarial Review %s Round %d Reviewer %d", baseTitle, round, i+1),
+			Description: c.buildSpecReviewTaskDescription(goal, specPath, round, i+1, len(reviewers)),
+			AssignTo:    reviewer,
+			DependsOn:   []string{consolidateTempID},
+			Priority:    1,
+		})
+	}
 	c.brainState.CurrentPlan.Phases = append(c.brainState.CurrentPlan.Phases,
 		Phase{
 			Number:      currentPhaseCount + 1,
-			Title:       fmt.Sprintf("Amend Spec Round %d", round-1),
-			Description: "Address every finding from the prior adversarial review.",
+			Title:       fmt.Sprintf("Consolidate Review Round %d", round-1),
+			Description: "Assess both reviewer outputs, decide what to accept, and amend the spec.",
 			Tasks: []PlannedTask{{
-				TempID:       amendTempID,
-				Title:        fmt.Sprintf("Amend %s Specification Round %d", baseTitle, round-1),
-				Description:  c.buildSpecAmendTaskDescription(goal, specPath, round-1),
+				TempID:       consolidateTempID,
+				Title:        fmt.Sprintf("Consolidate %s Review Round %d", baseTitle, round-1),
+				Description:  c.buildSpecConsolidationTaskDescription(goal, specPath, round-1, len(reviewers)),
 				AssignTo:     primary,
-				DependsOn:    []string{c.findPhaseTempIDForTaskLocked(reviewTaskID)},
+				DependsOn:    dependsOn,
 				Priority:     1,
 				FilesTouched: []string{specPath},
 			}},
@@ -2126,15 +2268,8 @@ func (c *Coordinator) appendSpecRevisionRoundLocked(goal *Goal, round int, revie
 		Phase{
 			Number:      currentPhaseCount + 2,
 			Title:       fmt.Sprintf("Adversarial Review Round %d", round),
-			Description: "Re-review the amended specification and confirm all issues are resolved.",
-			Tasks: []PlannedTask{{
-				TempID:      reviewTempID,
-				Title:       fmt.Sprintf("Adversarial Review %s Round %d", baseTitle, round),
-				Description: c.buildSpecReviewTaskDescription(goal, specPath, round),
-				AssignTo:    reviewer,
-				DependsOn:   []string{amendTempID},
-				Priority:    1,
-			}},
+			Description: "Run two parallel adversarial reviews over the consolidated specification.",
+			Tasks:       reviewTasks,
 		},
 	)
 	c.recordPlanLocked(c.brainState.CurrentPlan, "coordinator", fmt.Sprintf("appended review round %d", round))
@@ -2167,11 +2302,26 @@ func (c *Coordinator) firstTaskForPhaseLocked(phase Phase) *Task {
 	return nil
 }
 
+func (c *Coordinator) tasksForPhaseLocked(phase Phase) []*Task {
+	tasks := make([]*Task, 0, len(phase.Tasks))
+	for _, planned := range phase.Tasks {
+		if planned.RealTaskID == "" {
+			continue
+		}
+		if task := c.tasks[planned.RealTaskID]; task != nil {
+			tasks = append(tasks, task)
+		}
+	}
+	return tasks
+}
+
 func (c *Coordinator) workflowStageForPhase(phase Phase) string {
 	title := strings.ToLower(phase.Title)
 	switch {
 	case strings.Contains(title, "prepare spec"):
 		return "preparing_spec"
+	case strings.Contains(title, "consolidate review"):
+		return "consolidating_review"
 	case strings.Contains(title, "adversarial review"):
 		return "adversarial_review"
 	case strings.Contains(title, "amend spec"):
@@ -2231,12 +2381,12 @@ func (c *Coordinator) buildDeterministicPlanLocked(goal *Goal) (*Plan, error) {
 	if primary == "" {
 		return nil, errors.New("no suitable primary agent or role found")
 	}
-	reviewer := c.chooseReviewerRoleLocked(primary)
-	if primary == "spec_creator" && reviewer == "" {
-		return nil, errors.New("spec workflow requires at least one reviewer agent")
+	reviewers := c.chooseReviewerAgentsLocked(primary, 2)
+	if primary == "spec_creator" && len(reviewers) < 2 {
+		return nil, errors.New("spec workflow requires two reviewer agents")
 	}
-	if reviewer != "" && primary == "spec_creator" {
-		return c.buildSpecWorkflowPlanLocked(goal, primary, reviewer), nil
+	if len(reviewers) >= 2 && primary == "spec_creator" {
+		return c.buildSpecWorkflowPlanLocked(goal, primary, reviewers), nil
 	}
 
 	baseTitle := c.normalizedGoalTitle(goal)
@@ -2280,19 +2430,75 @@ func (c *Coordinator) choosePrimaryRoleLocked(goal *Goal) string {
 	return ""
 }
 
-func (c *Coordinator) chooseReviewerRoleLocked(primary string) string {
-	if !c.roleExistsLocked("reviewer") {
-		return ""
+func (c *Coordinator) chooseReviewerAgentsLocked(primary string, count int) []string {
+	if count <= 0 {
+		return nil
 	}
-	if primary == "reviewer" {
-		return ""
+	type candidate struct {
+		name     string
+		provider string
+		load     int
 	}
-	return "reviewer"
+	candidates := make([]candidate, 0)
+	for name, state := range c.agentState {
+		if state.Role != "reviewer" || name == primary {
+			continue
+		}
+		candidates = append(candidates, candidate{name: name, provider: state.Provider, load: c.agentLoadLocked(name)})
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].load != candidates[j].load {
+			return candidates[i].load < candidates[j].load
+		}
+		if candidates[i].provider != candidates[j].provider {
+			return candidates[i].provider < candidates[j].provider
+		}
+		return candidates[i].name < candidates[j].name
+	})
+
+	selected := make([]string, 0, min(count, len(candidates)))
+	usedProviders := map[string]bool{}
+	for _, candidate := range candidates {
+		if len(selected) >= count {
+			break
+		}
+		if candidate.provider != "" && usedProviders[candidate.provider] {
+			continue
+		}
+		selected = append(selected, candidate.name)
+		if candidate.provider != "" {
+			usedProviders[candidate.provider] = true
+		}
+	}
+	for _, candidate := range candidates {
+		if len(selected) >= count {
+			break
+		}
+		if containsString(selected, candidate.name) {
+			continue
+		}
+		selected = append(selected, candidate.name)
+	}
+	return selected
 }
 
-func (c *Coordinator) buildSpecWorkflowPlanLocked(goal *Goal, primary string, reviewer string) *Plan {
+func (c *Coordinator) buildSpecWorkflowPlanLocked(goal *Goal, primary string, reviewers []string) *Plan {
 	baseTitle := c.normalizedGoalTitle(goal)
 	specPath := c.specOutputPath(goal)
+	reviewTasks := make([]PlannedTask, 0, len(reviewers))
+	for i, reviewer := range reviewers {
+		reviewTasks = append(reviewTasks, PlannedTask{
+			TempID:      fmt.Sprintf("review-spec-r1-%d", i+1),
+			Title:       fmt.Sprintf("Adversarial Review %s Round 1 Reviewer %d", baseTitle, i+1),
+			Description: c.buildSpecReviewTaskDescription(goal, specPath, 1, i+1, len(reviewers)),
+			AssignTo:    reviewer,
+			DependsOn:   []string{"prepare-spec-r1"},
+			Priority:    1,
+		})
+	}
 	return &Plan{
 		GoalID: goal.ID,
 		Phases: []Phase{
@@ -2312,15 +2518,8 @@ func (c *Coordinator) buildSpecWorkflowPlanLocked(goal *Goal, primary string, re
 			{
 				Number:      2,
 				Title:       "Adversarial Review Round 1",
-				Description: "Critique the specification for ambiguity, missing assumptions, and implementation gaps.",
-				Tasks: []PlannedTask{{
-					TempID:      "review-spec-r1",
-					Title:       fmt.Sprintf("Adversarial Review %s Round 1", baseTitle),
-					Description: c.buildSpecReviewTaskDescription(goal, specPath, 1),
-					AssignTo:    reviewer,
-					DependsOn:   []string{"prepare-spec-r1"},
-					Priority:    1,
-				}},
+				Description: "Run two parallel adversarial reviews over the specification.",
+				Tasks:       reviewTasks,
 			},
 		},
 	}
@@ -2418,9 +2617,10 @@ func (c *Coordinator) buildSpecPreparationTaskDescription(goal *Goal, specPath s
 	}, "\n\n"))
 }
 
-func (c *Coordinator) buildSpecReviewTaskDescription(goal *Goal, specPath string, round int) string {
+func (c *Coordinator) buildSpecReviewTaskDescription(goal *Goal, specPath string, round int, reviewerIndex int, reviewerCount int) string {
 	return strings.TrimSpace(strings.Join([]string{
 		fmt.Sprintf("Perform adversarial review round %d on the prepared specification.", round),
+		fmt.Sprintf("You are reviewer %d of %d parallel reviewers for this round.", reviewerIndex, reviewerCount),
 		fmt.Sprintf("Use the grill-spec skill located at: %s", defaultSpecReviewSkillPath),
 		fmt.Sprintf("Review this workspace file only: %s", specPath),
 		"Assume the spec will be handed to an AI coding agent. Your job is to find every ambiguity, hidden assumption, missing edge case, missing acceptance criterion, and any unanswered engineering question.",
@@ -2433,15 +2633,17 @@ func (c *Coordinator) buildSpecReviewTaskDescription(goal *Goal, specPath string
 	}, "\n\n"))
 }
 
-func (c *Coordinator) buildSpecAmendTaskDescription(goal *Goal, specPath string, round int) string {
+func (c *Coordinator) buildSpecConsolidationTaskDescription(goal *Goal, specPath string, round int, reviewerCount int) string {
 	return strings.TrimSpace(strings.Join([]string{
-		fmt.Sprintf("Amend the specification after adversarial review round %d.", round),
+		fmt.Sprintf("Consolidate and amend the specification after adversarial review round %d.", round),
 		fmt.Sprintf("Use the plan-spec skill located at: %s", defaultSpecPrepSkillPath),
 		fmt.Sprintf("Update this workspace file in place: %s", specPath),
-		"Use the dependency context from the previous review task as the authoritative list of issues to resolve.",
-		"Address every blocker, ambiguity, assumption, and unanswered question raised by the reviewer.",
+		fmt.Sprintf("Use the dependency context from %d adversarial reviewer outputs as the authoritative review input.", reviewerCount),
+		"For each reviewer point, explicitly assess it, state whether you agree or disagree, and give a brief rationale.",
+		"Incorporate every accepted change into the specification.",
+		"If you disagree with a reviewer point, record the disagreement and rationale clearly in your summary so the next round can inspect it.",
 		"If any item cannot be fully resolved from the source materials, document it explicitly in the spec and in your summary.",
-		"At the end, provide a concise issue-by-issue resolution summary so the next review round can verify each change.",
+		"At the end, provide a concise issue-by-issue consolidation summary covering agree, disagree, and incorporate decisions.",
 		fmt.Sprintf("Goal title: %s", goal.Title),
 		"Goal details:",
 		goal.Description,
@@ -2559,6 +2761,21 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func processExists(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func humanMessageTaskTitle(agentName, content string) string {

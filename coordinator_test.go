@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -131,6 +132,235 @@ func TestSendHumanMessageCreatesRunnableTask(t *testing.T) {
 	}
 	if !foundReply {
 		t.Fatal("expected coordinator-to-human reply message")
+	}
+}
+
+func TestDispatchReadyTasksDoesNotPanicWhenAssignedAgentMissing(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.Workspace.Path = t.TempDir()
+	cfg.Workspace.InitGit = false
+	cfg.Log.File = filepath.Join(t.TempDir(), "agentbridge.log")
+	cfg.Team = []TeamMemberConfig{
+		{
+			Name:        "ghost",
+			Provider:    "claude",
+			Role:        "implementer",
+			Count:       1,
+			Description: "Missing runtime agent",
+		},
+	}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{}, nil, workspace, store, hub)
+	task := NewTask(CreateTaskRequest{
+		Title:       "Missing agent task",
+		Description: "Should not panic",
+		AssignedTo:  "ghost",
+	}, 1)
+
+	coordinator.mu.Lock()
+	coordinator.tasks[task.ID] = task
+	coordinator.taskOrder = append(coordinator.taskOrder, task.ID)
+	coordinator.agentState["ghost"] = &AgentState{
+		Name:         "ghost",
+		Provider:     "claude",
+		Role:         "implementer",
+		Status:       AgentIdle,
+		LastActivity: time.Now().UTC(),
+	}
+	coordinator.mu.Unlock()
+
+	coordinator.dispatchReadyTasks()
+
+	got, _, err := coordinator.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if got.Status != TaskBlocked {
+		t.Fatalf("expected blocked task, got %s", got.Status)
+	}
+	if got.Result == "" {
+		t.Fatal("expected missing-agent explanation on blocked task")
+	}
+}
+
+func TestRecoverFromLogRequeuesStaleRunningTask(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.Workspace.Path = t.TempDir()
+	cfg.Workspace.InitGit = false
+	cfg.Log.File = filepath.Join(t.TempDir(), "agentbridge.log")
+	cfg.Team = []TeamMemberConfig{
+		{
+			Name:        "claude",
+			Provider:    "claude",
+			Role:        "implementer",
+			Count:       1,
+			Description: "Implementation agent",
+		},
+	}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	task := NewTask(CreateTaskRequest{
+		Title:       "Recovered task",
+		Description: "Should be requeued",
+		AssignedTo:  "claude",
+	}, 1)
+	if err := task.Start(); err != nil {
+		t.Fatalf("task.Start() error = %v", err)
+	}
+	agentState := &AgentState{
+		Name:         "claude",
+		Provider:     "claude",
+		Role:         "implementer",
+		Status:       AgentBusy,
+		CurrentTask:  task.ID,
+		LastActivity: time.Now().UTC(),
+		LastInvocation: &CommandTelemetry{
+			Command:        "claude",
+			Status:         "running",
+			PID:            999999,
+			TimeoutSeconds: 900,
+			StartedAt:      time.Now().Add(-time.Minute),
+			LastEventAt:    time.Now().Add(-time.Minute),
+		},
+	}
+	if err := store.Append(&Message{Metadata: Metadata{Task: task.Clone()}}); err != nil {
+		t.Fatalf("append task message: %v", err)
+	}
+	if err := store.Append(&Message{Metadata: Metadata{Agent: agentState}}); err != nil {
+		t.Fatalf("append agent message: %v", err)
+	}
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"claude": &MockAdapter{name: "claude", response: "done", delay: 20 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	if err := coordinator.RecoverFromLog(); err != nil {
+		t.Fatalf("RecoverFromLog() error = %v", err)
+	}
+
+	recovered, _, err := coordinator.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if recovered.Status != TaskPending {
+		t.Fatalf("expected pending recovered task, got %s", recovered.Status)
+	}
+	if coordinator.agentState["claude"].Status != AgentIdle {
+		t.Fatalf("expected idle recovered agent, got %s", coordinator.agentState["claude"].Status)
+	}
+}
+
+func TestRecoverFromLogKeepsLiveRunningTask(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.Workspace.Path = t.TempDir()
+	cfg.Workspace.InitGit = false
+	cfg.Log.File = filepath.Join(t.TempDir(), "agentbridge.log")
+	cfg.Team = []TeamMemberConfig{
+		{
+			Name:        "claude",
+			Provider:    "claude",
+			Role:        "implementer",
+			Count:       1,
+			Description: "Implementation agent",
+		},
+	}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	task := NewTask(CreateTaskRequest{
+		Title:       "Recovered task",
+		Description: "Should stay running",
+		AssignedTo:  "claude",
+	}, 1)
+	if err := task.Start(); err != nil {
+		t.Fatalf("task.Start() error = %v", err)
+	}
+	agentState := &AgentState{
+		Name:         "claude",
+		Provider:     "claude",
+		Role:         "implementer",
+		Status:       AgentBusy,
+		CurrentTask:  task.ID,
+		LastActivity: time.Now().UTC(),
+		LastInvocation: &CommandTelemetry{
+			Command:        "claude",
+			Status:         "running",
+			PID:            os.Getpid(),
+			TimeoutSeconds: 900,
+			StartedAt:      time.Now().Add(-time.Second),
+			LastEventAt:    time.Now().Add(-time.Second),
+		},
+	}
+	if err := store.Append(&Message{Metadata: Metadata{Task: task.Clone()}}); err != nil {
+		t.Fatalf("append task message: %v", err)
+	}
+	if err := store.Append(&Message{Metadata: Metadata{Agent: agentState}}); err != nil {
+		t.Fatalf("append agent message: %v", err)
+	}
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"claude": &MockAdapter{name: "claude", response: "done", delay: 20 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	if err := coordinator.RecoverFromLog(); err != nil {
+		t.Fatalf("RecoverFromLog() error = %v", err)
+	}
+
+	recovered, _, err := coordinator.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask() error = %v", err)
+	}
+	if recovered.Status != TaskRunning {
+		t.Fatalf("expected running recovered task, got %s", recovered.Status)
+	}
+	if coordinator.agentState["claude"].Status != AgentBusy {
+		t.Fatalf("expected busy recovered agent, got %s", coordinator.agentState["claude"].Status)
 	}
 }
 

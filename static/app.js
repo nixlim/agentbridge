@@ -11,6 +11,8 @@ const state = {
   search: "",
   agentFilter: "",
   messageTypeFilter: new Set(),
+  activeTaskInteractionId: "",
+  pendingTaskRender: false,
 };
 
 const refs = {
@@ -131,8 +133,8 @@ function init() {
   connectWebSocket();
   window.setInterval(() => {
     renderAgents();
-    renderTasks();
     renderWorkflowPanel();
+    updateTaskTimers();
   }, 1000);
 }
 
@@ -160,7 +162,7 @@ function connectWebSocket() {
         break;
       case "task_update":
         upsertTask(payload.data);
-        renderTasks();
+        requestTaskRender();
         renderPlan();
         renderGoalBar();
         renderWorkflowPanel();
@@ -224,6 +226,38 @@ function renderAll() {
   renderMessages();
   renderWorkspace();
   refreshWorkspace();
+}
+
+function beginTaskInteraction(taskId) {
+  state.activeTaskInteractionId = taskId;
+}
+
+function endTaskInteraction(taskId) {
+  if (state.activeTaskInteractionId && state.activeTaskInteractionId !== taskId) return;
+  state.activeTaskInteractionId = "";
+  if (state.pendingTaskRender) {
+    state.pendingTaskRender = false;
+    renderTasks();
+  }
+}
+
+function requestTaskRender() {
+  if (state.activeTaskInteractionId) {
+    state.pendingTaskRender = true;
+    return;
+  }
+  state.pendingTaskRender = false;
+  renderTasks();
+}
+
+function updateTaskTimers() {
+  refs.tasksList.querySelectorAll("[data-task-timestamp]").forEach((node) => {
+    const timestamp = node.dataset.taskTimestamp;
+    if (!timestamp) return;
+    node.textContent = node.dataset.taskRunning === "true"
+      ? elapsed(timestamp)
+      : formatTime(timestamp);
+  });
 }
 
 function populateAgentOptions() {
@@ -706,6 +740,8 @@ function renderTaskCard(task) {
   const timer = document.createElement("span");
   timer.className = "card-meta";
   timer.style.marginTop = "0";
+  timer.dataset.taskTimestamp = task.started_at || task.created_at || "";
+  timer.dataset.taskRunning = task.status === "running" ? "true" : "false";
   timer.textContent = task.status === "running" ? elapsed(task.started_at || task.created_at) : formatTime(task.created_at);
   header.append(titleWrap, timer);
 
@@ -776,6 +812,11 @@ function renderTaskCard(task) {
     assign.className = "select-inline btn-sm";
     appendOption(assign, "", "Reassign");
     Object.keys(state.agents).sort().forEach((name) => appendOption(assign, name, name));
+    assign.addEventListener("focus", () => beginTaskInteraction(task.id));
+    assign.addEventListener("mousedown", () => beginTaskInteraction(task.id));
+    assign.addEventListener("blur", () => {
+      window.setTimeout(() => endTaskInteraction(task.id), 0);
+    });
     assign.addEventListener("change", () => {
       if (assign.value) {
         apiPost(`/api/tasks/${task.id}/reassign`, { new_agent: assign.value, reason: "manual override" });

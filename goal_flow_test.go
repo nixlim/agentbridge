@@ -389,11 +389,18 @@ func TestSpecGoalCreatesDraftReviewAndReviseWorkflow(t *testing.T) {
 			Description: "Writes specifications",
 		},
 		{
-			Name:        "review-1",
+			Name:        "review-codex",
 			Provider:    "codex",
 			Role:        "reviewer",
 			Count:       1,
 			Description: "Reviews specifications",
+		},
+		{
+			Name:        "review-claude",
+			Provider:    "claude",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications from a second perspective",
 		},
 	}
 	cfg.Agents = map[string]AgentConfig{
@@ -402,7 +409,12 @@ func TestSpecGoalCreatesDraftReviewAndReviseWorkflow(t *testing.T) {
 			TimeoutSeconds: 5,
 			MaxRetries:     1,
 		},
-		"review-1": {
+		"review-codex": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-claude": {
 			Command:        "mock",
 			TimeoutSeconds: 5,
 			MaxRetries:     1,
@@ -425,8 +437,9 @@ func TestSpecGoalCreatesDraftReviewAndReviseWorkflow(t *testing.T) {
 	defer hub.Shutdown()
 
 	coordinator := NewCoordinator(cfg, map[string]Agent{
-		"spec-1":   &scriptedAgent{name: "spec-1", responses: []string{"initial spec", "revised spec"}, delay: 20 * time.Millisecond, available: true},
-		"review-1": &scriptedAgent{name: "review-1", responses: []string{"VERDICT: FAIL\n\nBLOCKERS\n- needs a clearer acceptance criteria section", "VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent."}, delay: 20 * time.Millisecond, available: true},
+		"spec-1":        &scriptedAgent{name: "spec-1", responses: []string{"initial spec", "revised spec"}, delay: 20 * time.Millisecond, available: true},
+		"review-codex":  &scriptedAgent{name: "review-codex", responses: []string{"VERDICT: FAIL\n\nBLOCKERS\n- needs a clearer acceptance criteria section", "VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent."}, delay: 20 * time.Millisecond, available: true},
+		"review-claude": &scriptedAgent{name: "review-claude", responses: []string{"VERDICT: PASS\n\nThe spec is acceptable for round 1.", "VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent."}, delay: 20 * time.Millisecond, available: true},
 	}, nil, workspace, store, hub)
 	coordinator.Start()
 	defer func() { _ = coordinator.Stop(context.Background()) }()
@@ -455,8 +468,8 @@ func TestSpecGoalCreatesDraftReviewAndReviseWorkflow(t *testing.T) {
 	if current.Status != GoalCompleted {
 		t.Fatalf("expected goal completed, got %s with snapshot %#v", current.Status, coordinator.Snapshot())
 	}
-	if len(tasks) != 4 {
-		t.Fatalf("expected prepare, review, amend, and final review tasks, got %d", len(tasks))
+	if len(tasks) != 6 {
+		t.Fatalf("expected prepare, dual review, consolidate, and final dual review tasks, got %d", len(tasks))
 	}
 	if plan == nil || len(plan.Phases) != 4 {
 		t.Fatalf("expected four workflow phases, got %#v", plan)
@@ -467,9 +480,11 @@ func TestSpecGoalCreatesDraftReviewAndReviseWorkflow(t *testing.T) {
 	}
 	for _, title := range []string{
 		"Prepare B2 spec Specification",
-		"Adversarial Review B2 spec Round 1",
-		"Amend B2 spec Specification Round 1",
-		"Adversarial Review B2 spec Round 2",
+		"Adversarial Review B2 spec Round 1 Reviewer 1",
+		"Adversarial Review B2 spec Round 1 Reviewer 2",
+		"Consolidate B2 spec Review Round 1",
+		"Adversarial Review B2 spec Round 2 Reviewer 1",
+		"Adversarial Review B2 spec Round 2 Reviewer 2",
 	} {
 		if statusByTitle[title] != TaskCompleted {
 			t.Fatalf("expected %q completed, got %s", title, statusByTitle[title])
@@ -546,11 +561,18 @@ func TestSpecWorkflowAutoCompletesQuiescentArtifactTask(t *testing.T) {
 			Description: "Creates specifications",
 		},
 		{
-			Name:        "review-1",
+			Name:        "review-codex",
 			Provider:    "codex",
 			Role:        "reviewer",
 			Count:       1,
 			Description: "Reviews specifications",
+		},
+		{
+			Name:        "review-claude",
+			Provider:    "claude",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications from a second perspective",
 		},
 	}
 
@@ -570,8 +592,9 @@ func TestSpecWorkflowAutoCompletesQuiescentArtifactTask(t *testing.T) {
 	defer hub.Shutdown()
 
 	coordinator := NewCoordinator(cfg, map[string]Agent{
-		"spec-1":   &hangingFileAgent{name: "spec-1", filePath: "specs/b2-spec-spec.md", content: "# spec", available: true},
-		"review-1": &scriptedAgent{name: "review-1", responses: []string{"VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent."}, delay: 20 * time.Millisecond, available: true},
+		"spec-1":        &hangingFileAgent{name: "spec-1", filePath: "specs/b2-spec-spec.md", content: "# spec", available: true},
+		"review-codex":  &scriptedAgent{name: "review-codex", responses: []string{"VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent."}, delay: 20 * time.Millisecond, available: true},
+		"review-claude": &scriptedAgent{name: "review-claude", responses: []string{"VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent."}, delay: 20 * time.Millisecond, available: true},
 	}, nil, workspace, store, hub)
 	coordinator.Start()
 	defer func() { _ = coordinator.Stop(context.Background()) }()
@@ -599,8 +622,8 @@ func TestSpecWorkflowAutoCompletesQuiescentArtifactTask(t *testing.T) {
 	if plan == nil || len(plan.Phases) < 2 {
 		t.Fatalf("expected review phase after artifact completion, got %#v", plan)
 	}
-	if len(tasks) < 2 {
-		t.Fatalf("expected prepare and review tasks, got %d", len(tasks))
+	if len(tasks) < 3 {
+		t.Fatalf("expected prepare and dual review tasks, got %d", len(tasks))
 	}
 	if tasks[0].Status != TaskCompleted {
 		t.Fatalf("expected prepare task completed, got %s", tasks[0].Status)
@@ -622,11 +645,18 @@ func TestSpecWorkflowHonorsGoalReviewRoundOverride(t *testing.T) {
 			Description: "Creates specifications",
 		},
 		{
-			Name:        "review-1",
+			Name:        "review-codex",
 			Provider:    "codex",
 			Role:        "reviewer",
 			Count:       1,
 			Description: "Reviews specifications",
+		},
+		{
+			Name:        "review-claude",
+			Provider:    "claude",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications from a second perspective",
 		},
 	}
 	cfg.Agents = map[string]AgentConfig{
@@ -635,7 +665,12 @@ func TestSpecWorkflowHonorsGoalReviewRoundOverride(t *testing.T) {
 			TimeoutSeconds: 5,
 			MaxRetries:     1,
 		},
-		"review-1": {
+		"review-codex": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-claude": {
 			Command:        "mock",
 			TimeoutSeconds: 5,
 			MaxRetries:     1,
@@ -658,8 +693,9 @@ func TestSpecWorkflowHonorsGoalReviewRoundOverride(t *testing.T) {
 	defer hub.Shutdown()
 
 	coordinator := NewCoordinator(cfg, map[string]Agent{
-		"spec-1":   &scriptedAgent{name: "spec-1", responses: []string{"initial spec", "revised spec", "revised spec again"}, delay: 20 * time.Millisecond, available: true},
-		"review-1": &scriptedAgent{name: "review-1", responses: []string{"VERDICT: FAIL\n\nBLOCKERS\n- still ambiguous", "VERDICT: FAIL\n\nBLOCKERS\n- still ambiguous"}, delay: 20 * time.Millisecond, available: true},
+		"spec-1":        &scriptedAgent{name: "spec-1", responses: []string{"initial spec", "revised spec"}, delay: 20 * time.Millisecond, available: true},
+		"review-codex":  &scriptedAgent{name: "review-codex", responses: []string{"VERDICT: FAIL\n\nBLOCKERS\n- still ambiguous", "VERDICT: FAIL\n\nBLOCKERS\n- still ambiguous"}, delay: 20 * time.Millisecond, available: true},
+		"review-claude": &scriptedAgent{name: "review-claude", responses: []string{"VERDICT: FAIL\n\nBLOCKERS\n- still ambiguous", "VERDICT: FAIL\n\nBLOCKERS\n- still ambiguous"}, delay: 20 * time.Millisecond, available: true},
 	}, nil, workspace, store, hub)
 	coordinator.Start()
 	defer func() { _ = coordinator.Stop(context.Background()) }()
@@ -689,10 +725,10 @@ func TestSpecWorkflowHonorsGoalReviewRoundOverride(t *testing.T) {
 		t.Fatalf("expected goal review rounds 2, got %d", current.MaxReviewRounds)
 	}
 	if plan == nil || len(plan.Phases) != 4 {
-		t.Fatalf("expected prepare, review, amend, review phases, got %#v", plan)
+		t.Fatalf("expected prepare, dual review, consolidate, dual review phases, got %#v", plan)
 	}
-	if len(tasks) != 4 {
-		t.Fatalf("expected 4 tasks before block, got %d", len(tasks))
+	if len(tasks) != 6 {
+		t.Fatalf("expected 6 tasks before block, got %d", len(tasks))
 	}
 }
 
