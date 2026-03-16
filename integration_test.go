@@ -43,7 +43,7 @@ func TestHTTPAndWebSocketIntegration(t *testing.T) {
 
 	coordinator := NewCoordinator(cfg, map[string]Agent{
 		"claude": &MockAdapter{name: "claude", response: "integration complete", delay: 25 * time.Millisecond, available: true},
-	}, workspace, store, hub)
+	}, nil, workspace, store, hub)
 	coordinator.Start()
 	defer func() {
 		_ = coordinator.Stop(context.Background())
@@ -134,5 +134,70 @@ func TestHTTPAndWebSocketIntegration(t *testing.T) {
 	workspaceURL := server.URL + "/api/workspace/files"
 	if _, err := url.Parse(workspaceURL); err != nil {
 		t.Fatalf("unexpected workspace url parse error = %v", err)
+	}
+}
+
+func TestHTTPGoalSubmissionIntegration(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"impl-1": &scriptedAgent{name: "impl-1", responses: []string{"implemented over HTTP"}, delay: 20 * time.Millisecond, available: true},
+	}, &scriptedBrain{mode: "goal-complete", available: true}, workspace, store, hub)
+	coordinator.Start()
+	defer func() {
+		_ = coordinator.Stop(context.Background())
+	}()
+
+	server := httptest.NewServer(NewServer(coordinator).Handler())
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/api/goals", "application/json", strings.NewReader(`{"title":"HTTP goal","description":"Drive the new goal endpoint"}`))
+	if err != nil {
+		t.Fatalf("http post error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d", http.StatusCreated, resp.StatusCode)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		stateResp, err := http.Get(server.URL + "/api/goals")
+		if err != nil {
+			return false
+		}
+		defer stateResp.Body.Close()
+		var goals []*Goal
+		if err := json.NewDecoder(stateResp.Body).Decode(&goals); err != nil {
+			return false
+		}
+		return len(goals) == 1 && goals[0].Status == GoalCompleted
+	})
+
+	planResp, err := http.Get(server.URL + "/api/plan")
+	if err != nil {
+		t.Fatalf("plan request error = %v", err)
+	}
+	defer planResp.Body.Close()
+	var plan Plan
+	if err := json.NewDecoder(planResp.Body).Decode(&plan); err != nil {
+		t.Fatalf("decode plan error = %v", err)
+	}
+	if len(plan.Phases) != 1 {
+		t.Fatalf("expected one plan phase, got %d", len(plan.Phases))
 	}
 }

@@ -22,6 +22,7 @@ const (
 type Task struct {
 	ID                 string     `json:"id"`
 	ParentID           string     `json:"parent_id,omitempty"`
+	GoalID             string     `json:"goal_id,omitempty"`
 	Title              string     `json:"title"`
 	Description        string     `json:"description"`
 	AssignedTo         string     `json:"assigned_to"`
@@ -41,30 +42,47 @@ type Task struct {
 	ReviewResult       string     `json:"review_result,omitempty"`
 	ReviewReason       string     `json:"review_reason,omitempty"`
 	ReviewActionTaskID string     `json:"review_action_task_id,omitempty"`
+	ErrorOutput        string     `json:"error_output,omitempty"`
 	IsReviewTask       bool       `json:"is_review_task,omitempty"`
 	IsHumanMessage     bool       `json:"is_human_message,omitempty"`
+	RevisionOf         string     `json:"revision_of,omitempty"`
+	RevisionFeedback   string     `json:"revision_feedback,omitempty"`
+	RevisionCount      int        `json:"revision_count,omitempty"`
+	FilesTouched       []string   `json:"files_touched,omitempty"`
+	Priority           int        `json:"priority,omitempty"`
+	PlanPhase          int        `json:"plan_phase,omitempty"`
 }
 
 type CreateTaskRequest struct {
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	AssignedTo  string   `json:"assigned_to"`
-	DependsOn   []string `json:"depends_on"`
-	ReviewBy    string   `json:"review_by"`
+	Title        string   `json:"title"`
+	Description  string   `json:"description"`
+	AssignedTo   string   `json:"assigned_to"`
+	DependsOn    []string `json:"depends_on"`
+	ReviewBy     string   `json:"review_by"`
+	GoalID       string   `json:"goal_id"`
+	FilesTouched []string `json:"files_touched"`
+	Priority     int      `json:"priority"`
 }
 
 func NewTask(req CreateTaskRequest, maxRetries int) *Task {
+	priority := req.Priority
+	if priority <= 0 {
+		priority = 3
+	}
 	return &Task{
-		ID:          uuid.NewString(),
-		Title:       req.Title,
-		Description: req.Description,
-		AssignedTo:  req.AssignedTo,
-		Status:      TaskPending,
-		DependsOn:   append([]string(nil), req.DependsOn...),
-		ReviewBy:    req.ReviewBy,
-		CreatedAt:   time.Now().UTC(),
-		MaxRetries:  maxRetries,
-		MessageIDs:  []string{},
+		ID:           uuid.NewString(),
+		GoalID:       req.GoalID,
+		Title:        req.Title,
+		Description:  req.Description,
+		AssignedTo:   req.AssignedTo,
+		Status:       TaskPending,
+		DependsOn:    append([]string(nil), req.DependsOn...),
+		ReviewBy:     req.ReviewBy,
+		CreatedAt:    time.Now().UTC(),
+		MaxRetries:   maxRetries,
+		MessageIDs:   []string{},
+		FilesTouched: append([]string(nil), req.FilesTouched...),
+		Priority:     priority,
 	}
 }
 
@@ -75,6 +93,7 @@ func (t *Task) Start() error {
 	now := time.Now().UTC()
 	t.Status = TaskRunning
 	t.StartedAt = &now
+	t.CompletedAt = nil
 	return nil
 }
 
@@ -131,6 +150,16 @@ func (t *Task) Fail(reason string) error {
 	return nil
 }
 
+func (t *Task) Retry() error {
+	if t.Status != TaskFailed && t.Status != TaskCancelled {
+		return errors.New("task cannot be retried from current state")
+	}
+	t.Status = TaskPending
+	t.CompletedAt = nil
+	t.StartedAt = nil
+	return nil
+}
+
 func (t *Task) Cancel(reason string) error {
 	if t.Status == TaskCompleted || t.Status == TaskFailed || t.Status == TaskCancelled {
 		return errors.New("task cannot be cancelled from terminal state")
@@ -172,5 +201,6 @@ func (t *Task) Clone() *Task {
 	clone.DependsOn = append([]string(nil), t.DependsOn...)
 	clone.MessageIDs = append([]string(nil), t.MessageIDs...)
 	clone.FilesChanged = append([]string(nil), t.FilesChanged...)
+	clone.FilesTouched = append([]string(nil), t.FilesTouched...)
 	return &clone
 }

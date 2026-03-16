@@ -17,16 +17,23 @@ const (
 	AgentBusy    AgentStatus = "busy"
 	AgentError   AgentStatus = "error"
 	AgentOffline AgentStatus = "offline"
+	AgentPaused  AgentStatus = "paused"
 )
 
 type AgentState struct {
-	Name           string      `json:"name"`
-	Status         AgentStatus `json:"status"`
-	CurrentTask    string      `json:"current_task,omitempty"`
-	TasksCompleted int         `json:"tasks_completed"`
-	TotalTokensIn  int         `json:"total_tokens_in"`
-	TotalTokensOut int         `json:"total_tokens_out"`
-	LastActivity   time.Time   `json:"last_activity"`
+	Name              string             `json:"name"`
+	Provider          string             `json:"provider"`
+	Role              string             `json:"role"`
+	Description       string             `json:"description"`
+	Status            AgentStatus        `json:"status"`
+	CurrentTask       string             `json:"current_task,omitempty"`
+	TasksCompleted    int                `json:"tasks_completed"`
+	TasksFailed       int                `json:"tasks_failed"`
+	TotalTokensIn     int                `json:"total_tokens_in"`
+	TotalTokensOut    int                `json:"total_tokens_out"`
+	LastActivity      time.Time          `json:"last_activity"`
+	LastInvocation    *CommandTelemetry  `json:"last_invocation,omitempty"`
+	RecentInvocations []CommandTelemetry `json:"recent_invocations,omitempty"`
 }
 
 type Agent interface {
@@ -47,14 +54,17 @@ type AgentResult struct {
 }
 
 func newInitialAgentStates(cfg Config, agents map[string]Agent) map[string]*AgentState {
-	states := make(map[string]*AgentState, len(cfg.Agents))
-	for name := range cfg.Agents {
+	states := make(map[string]*AgentState, len(cfg.Team))
+	for _, member := range cfg.Team {
 		status := AgentOffline
-		if agent, ok := agents[name]; ok && agent.IsAvailable() {
+		if agent, ok := agents[member.Name]; ok && agent.IsAvailable() {
 			status = AgentIdle
 		}
-		states[name] = &AgentState{
-			Name:         name,
+		states[member.Name] = &AgentState{
+			Name:         member.Name,
+			Provider:     member.Provider,
+			Role:         member.Role,
+			Description:  member.Description,
 			Status:       status,
 			LastActivity: time.Now().UTC(),
 		}

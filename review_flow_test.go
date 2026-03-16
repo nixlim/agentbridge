@@ -33,7 +33,7 @@ func TestReviewTaskDispatchesWhenParentIsInReview(t *testing.T) {
 	coordinator := NewCoordinator(cfg, map[string]Agent{
 		"claude": &MockAdapter{name: "claude", response: "implementation complete", delay: 20 * time.Millisecond, available: true},
 		"codex":  &MockAdapter{name: "codex", response: "review complete", delay: 20 * time.Millisecond, available: true},
-	}, workspace, store, hub)
+	}, nil, workspace, store, hub)
 	coordinator.Start()
 	defer func() {
 		_ = coordinator.Stop(context.Background())

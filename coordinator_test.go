@@ -38,7 +38,7 @@ func TestCoordinatorDispatchesTaskWithMockAgent(t *testing.T) {
 	agents := map[string]Agent{
 		"claude": &MockAdapter{name: "claude", response: "done", delay: 20 * time.Millisecond, available: true},
 	}
-	coordinator := NewCoordinator(cfg, agents, workspace, store, hub)
+	coordinator := NewCoordinator(cfg, agents, nil, workspace, store, hub)
 	coordinator.Start()
 	defer func() {
 		_ = coordinator.Stop(context.Background())
@@ -98,7 +98,7 @@ func TestSendHumanMessageCreatesRunnableTask(t *testing.T) {
 	agents := map[string]Agent{
 		"claude": &MockAdapter{name: "claude", response: "hello back", delay: 20 * time.Millisecond, available: true},
 	}
-	coordinator := NewCoordinator(cfg, agents, workspace, store, hub)
+	coordinator := NewCoordinator(cfg, agents, nil, workspace, store, hub)
 	coordinator.Start()
 	defer func() {
 		_ = coordinator.Stop(context.Background())

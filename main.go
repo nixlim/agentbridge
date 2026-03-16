@@ -32,12 +32,12 @@ func main() {
 	hub := NewWebSocketHub()
 	go hub.Run()
 
-	agents := map[string]Agent{
-		"claude": NewClaudeAdapter(cfg.Agents["claude"], workspace.Path()),
-		"codex":  NewCodexAdapter(cfg.Agents["codex"], workspace.Path()),
+	agents, err := instantiateTeamAgents(cfg, workspace.Path())
+	if err != nil {
+		log.Fatalf("instantiate team agents: %v", err)
 	}
 
-	coordinator := NewCoordinator(cfg, agents, workspace, logStore, hub)
+	coordinator := NewCoordinator(cfg, agents, nil, workspace, logStore, hub)
 	if err := coordinator.RecoverFromLog(); err != nil {
 		log.Fatalf("recover from log: %v", err)
 	}
