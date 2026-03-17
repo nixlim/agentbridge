@@ -150,6 +150,9 @@
           <div class="section-header">
             <span class="section-title">File Tree</span>
             <div class="section-actions">
+              <input id="workspace-upload-dir" type="text" placeholder="Target folder (optional)">
+              <input id="workspace-upload-input" type="file" multiple>
+              <button id="upload-workspace" type="button" class="btn-sm">Upload</button>
               <button id="refresh-workspace" type="button" class="btn-sm">Refresh</button>
             </div>
           </div>
@@ -166,6 +169,10 @@
           <form id="goal-form" class="form-grid" style="grid-template-columns:1fr">
             <input id="goal-input-title" type="text" placeholder="Goal title">
             <textarea id="goal-input-description" rows="3" placeholder="High-level outcome, constraints, or guidance"></textarea>
+            <select id="goal-input-recipe">
+              <option value="spec-review-loop">Parallel review + creator consolidation</option>
+              <option value="spec-cross-critique-loop">Cross-critique review loop</option>
+            </select>
             <input id="goal-input-review-rounds" type="number" min="1" step="1" placeholder="Review rounds override (optional)">
             <button type="submit">Submit Goal</button>
           </form>

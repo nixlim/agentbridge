@@ -794,6 +794,14 @@ button[type="submit"]:hover,
   overflow-y: auto;
 }
 
+#workspace-upload-dir {
+  min-width: 180px;
+}
+
+#workspace-upload-input {
+  max-width: 220px;
+}
+
 .tree-node {
   display: grid;
   gap: 2px;

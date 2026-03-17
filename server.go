@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -62,7 +63,7 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/api/goals/{id}", s.handleGoalDetail).Methods(http.MethodGet)
 	s.router.HandleFunc("/api/goals/{id}/kill", s.handleGoalKill).Methods(http.MethodPost)
 	s.router.HandleFunc("/api/plan", s.handlePlan).Methods(http.MethodGet, http.MethodPost)
-	s.router.HandleFunc("/api/workspace/files", s.handleWorkspaceFiles).Methods(http.MethodGet)
+	s.router.HandleFunc("/api/workspace/files", s.handleWorkspaceFiles).Methods(http.MethodGet, http.MethodPost)
 	s.router.HandleFunc("/api/workspace/files/{path:.*}", s.handleWorkspaceFile).Methods(http.MethodGet)
 	s.router.HandleFunc("/api/workspace/diff", s.handleWorkspaceDiff).Methods(http.MethodGet)
 }
@@ -408,6 +409,41 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkspaceFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		if err := r.ParseMultipartForm(128 << 20); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		targetDir := strings.TrimSpace(r.FormValue("target_dir"))
+		files := r.MultipartForm.File["files"]
+		if len(files) == 0 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("no files uploaded"))
+			return
+		}
+		uploaded := make([]string, 0, len(files))
+		for _, header := range files {
+			src, err := header.Open()
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			defer src.Close()
+			filename := filepath.Base(header.Filename)
+			relPath := filename
+			if targetDir != "" {
+				relPath = filepath.Join(targetDir, filename)
+			}
+			writtenPath, err := s.coordinator.workspace.WriteFile(relPath, src)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			uploaded = append(uploaded, writtenPath)
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"uploaded": uploaded})
+		return
+	}
+
 	files, err := s.coordinator.workspace.ListFiles()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)

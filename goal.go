@@ -16,6 +16,7 @@ type Goal struct {
 	ID              string     `json:"id"`
 	Title           string     `json:"title"`
 	Description     string     `json:"description"`
+	WorkflowRecipe  string     `json:"workflow_recipe,omitempty"`
 	MaxReviewRounds int        `json:"max_review_rounds,omitempty"`
 	Status          GoalStatus `json:"status"`
 	PlanID          string     `json:"plan_id,omitempty"`
@@ -27,5 +28,6 @@ type Goal struct {
 type CreateGoalRequest struct {
 	Title           string `json:"title"`
 	Description     string `json:"description"`
+	WorkflowRecipe  string `json:"workflow_recipe,omitempty"`
 	MaxReviewRounds int    `json:"max_review_rounds,omitempty"`
 }

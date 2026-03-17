@@ -8,6 +8,7 @@ workspace:
 
 workflow:
   default_review_rounds: 6
+  default_recipe: "spec-review-loop"
 
 brain:
   provider: "claude"

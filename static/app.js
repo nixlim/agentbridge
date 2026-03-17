@@ -21,6 +21,9 @@ const refs = {
   brainProviderLabel: document.getElementById("brain-provider-label"),
   workspacePath: document.getElementById("workspace-path"),
   refreshWorkspace: document.getElementById("refresh-workspace"),
+  uploadWorkspace: document.getElementById("upload-workspace"),
+  workspaceUploadInput: document.getElementById("workspace-upload-input"),
+  workspaceUploadDir: document.getElementById("workspace-upload-dir"),
   workspaceTree: document.getElementById("workspace-tree"),
   killGoal: document.getElementById("kill-goal"),
   goalbar: document.getElementById("goalbar"),
@@ -31,6 +34,7 @@ const refs = {
   goalForm: document.getElementById("goal-form"),
   goalInputTitle: document.getElementById("goal-input-title"),
   goalInputDescription: document.getElementById("goal-input-description"),
+  goalInputRecipe: document.getElementById("goal-input-recipe"),
   goalInputReviewRounds: document.getElementById("goal-input-review-rounds"),
   composerForm: document.getElementById("composer-form"),
   sendMode: document.getElementById("send-mode"),
@@ -122,6 +126,7 @@ function init() {
   refs.clearTasks.addEventListener("click", () => apiPost("/api/tasks/clear"));
   refs.killGoal.addEventListener("click", killGoal);
   refs.refreshWorkspace.addEventListener("click", refreshWorkspace);
+  refs.uploadWorkspace.addEventListener("click", uploadWorkspaceFiles);
   refs.goalForm.addEventListener("submit", submitGoal);
   refs.composerForm.addEventListener("submit", submitComposer);
   refs.sendMode.addEventListener("change", toggleComposerFields);
@@ -310,13 +315,25 @@ function renderGoalBar() {
 
   const parts = [goal.status];
   if (state.workflow.stage) parts.push(state.workflow.stage.replaceAll("_", " "));
-  if (state.workflow.current_phase_number) {
+  if (goal.workflow_recipe) parts.push(formatRecipeLabel(goal.workflow_recipe));
+  if (state.workflow.recipe === "spec-review-loop" || state.workflow.recipe === "spec-cross-critique-loop") {
+    if (state.workflow.review_round || goal.max_review_rounds) {
+      const activeRound = state.workflow.review_round || 0;
+      const maxRounds = goal.max_review_rounds || state.workflow.max_review_rounds || 0;
+      parts.push(maxRounds ? `review round ${activeRound}/${maxRounds}` : `review round ${activeRound}`);
+    }
+    if (state.workflow.stage_task_total) {
+      let progressLabel = "tasks";
+      if (state.workflow.stage === "adversarial_review") progressLabel = "reviewers";
+      if (state.workflow.stage === "cross_critique") progressLabel = "critiques";
+      parts.push(`${progressLabel} ${state.workflow.stage_task_completed || 0}/${state.workflow.stage_task_total} complete`);
+    }
+  } else if (state.workflow.current_phase_number) {
     const phaseLabel = state.workflow.total_phases
       ? `phase ${state.workflow.current_phase_number}/${state.workflow.total_phases}`
       : `phase ${state.workflow.current_phase_number}`;
     parts.push(state.workflow.current_phase_title ? `${phaseLabel} ${state.workflow.current_phase_title}` : phaseLabel);
   }
-  if (goal.max_review_rounds) parts.push(`review rounds ${goal.max_review_rounds}`);
   if (goal.summary && (goal.status === "blocked" || goal.status === "failed")) {
     parts.push(goal.summary);
   } else if (goal.description) {
@@ -429,7 +446,7 @@ function primaryWorkflowInvocation() {
 function formatWorkflowMeta(workflow) {
   if (!workflow || !workflow.mode) return "No active workflow.";
   const parts = [workflow.mode];
-  if (workflow.recipe) parts.push(workflow.recipe);
+  if (workflow.recipe) parts.push(formatRecipeLabel(workflow.recipe));
   if (workflow.review_round) {
     const rounds = workflow.max_review_rounds
       ? `active review round ${workflow.review_round}/${workflow.max_review_rounds}`
@@ -444,13 +461,26 @@ function formatWorkflowMeta(workflow) {
   return parts.join(" • ");
 }
 
+function formatRecipeLabel(recipe) {
+  switch (recipe) {
+    case "spec-cross-critique-loop":
+      return "cross-critique recipe";
+    case "spec-review-loop":
+      return "parallel review recipe";
+    default:
+      return recipe;
+  }
+}
+
 function formatWorkflowStatus(workflow) {
   if (!workflow || !workflow.mode) return "No active workflow state.";
   const parts = [workflow.status || "idle"];
   if (workflow.stage) parts.push(workflow.stage.replaceAll("_", " "));
-  if (workflow.recipe === "spec-review-loop" && workflow.stage_task_total) {
+  if ((workflow.recipe === "spec-review-loop" || workflow.recipe === "spec-cross-critique-loop") && workflow.stage_task_total) {
     if (workflow.stage === "adversarial_review") {
       parts.push(`reviewers ${workflow.stage_task_completed || 0}/${workflow.stage_task_total} complete`);
+    } else if (workflow.stage === "cross_critique") {
+      parts.push(`critiques ${workflow.stage_task_completed || 0}/${workflow.stage_task_total} complete`);
     } else {
       parts.push(`tasks ${workflow.stage_task_completed || 0}/${workflow.stage_task_total} complete`);
     }
@@ -950,6 +980,7 @@ async function submitGoal(event) {
   await apiPost("/api/goals", {
     title: refs.goalInputTitle.value,
     description: refs.goalInputDescription.value,
+    workflow_recipe: refs.goalInputRecipe.value,
     max_review_rounds: Number.isFinite(parsedRounds) && parsedRounds > 0 ? parsedRounds : 0,
   });
   refs.goalInputTitle.value = "";
@@ -1016,6 +1047,16 @@ async function apiPost(path, body = undefined) {
   }
 }
 
+async function apiUpload(path, formData) {
+  const response = await fetch(path, { method: "POST", body: formData });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    window.alert(payload.error || `Request failed: ${response.status}`);
+    return null;
+  }
+  return response.json().catch(() => ({}));
+}
+
 async function refreshWorkspace() {
   try {
     const response = await fetch("/api/workspace/files");
@@ -1023,6 +1064,22 @@ async function refreshWorkspace() {
     state.workspaceFiles = await response.json();
     renderWorkspace();
   } catch (_) {}
+}
+
+async function uploadWorkspaceFiles() {
+  const files = Array.from(refs.workspaceUploadInput.files || []);
+  if (!files.length) {
+    window.alert("Select at least one file to upload.");
+    return;
+  }
+  const formData = new FormData();
+  files.forEach((file) => formData.append("files", file));
+  const targetDir = refs.workspaceUploadDir.value.trim();
+  if (targetDir) formData.append("target_dir", targetDir);
+  const payload = await apiUpload("/api/workspace/files", formData);
+  if (!payload) return;
+  refs.workspaceUploadInput.value = "";
+  await refreshWorkspace();
 }
 
 function upsertTask(task) {

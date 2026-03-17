@@ -7,6 +7,11 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	workflowRecipeSpecReviewLoop        = "spec-review-loop"
+	workflowRecipeSpecCrossCritiqueLoop = "spec-cross-critique-loop"
+)
+
 type Plan struct {
 	ID        string    `json:"id"`
 	GoalID    string    `json:"goal_id"`
@@ -106,6 +111,7 @@ func (pe *PlanExecutor) ExecutePhase(c *Coordinator, phaseIndex int) error {
 			return err
 		}
 		task.PlanPhase = phase.Number
+		task.DiscussionFile = c.discussionFilePathLocked(task)
 		pt.RealTaskID = task.ID
 		pe.tempToReal[pt.TempID] = task.ID
 	}

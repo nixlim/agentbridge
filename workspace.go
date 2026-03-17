@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -186,19 +187,49 @@ func (w *Workspace) ListFiles() ([]string, error) {
 }
 
 func (w *Workspace) ReadFile(relPath string) ([]byte, error) {
-	cleaned := filepath.Clean(relPath)
+	fullPath, err := w.resolvePath(relPath)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(fullPath)
+}
+
+func (w *Workspace) WriteFile(relPath string, content io.Reader) (string, error) {
+	fullPath, err := w.resolvePath(relPath)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+		return "", fmt.Errorf("create parent dir: %w", err)
+	}
+	data, err := io.ReadAll(content)
+	if err != nil {
+		return "", fmt.Errorf("read upload: %w", err)
+	}
+	if err := os.WriteFile(fullPath, data, 0o644); err != nil {
+		return "", fmt.Errorf("write file: %w", err)
+	}
+	rel, err := filepath.Rel(w.path, fullPath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+func (w *Workspace) resolvePath(relPath string) (string, error) {
+	cleaned := filepath.Clean(strings.TrimSpace(relPath))
 	if cleaned == "." || cleaned == "" {
-		return nil, errors.New("file path is required")
+		return "", errors.New("file path is required")
 	}
 	fullPath := filepath.Join(w.path, cleaned)
 	rel, err := filepath.Rel(w.path, fullPath)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	if strings.HasPrefix(rel, "..") {
-		return nil, errors.New("invalid path")
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("invalid path")
 	}
-	return os.ReadFile(fullPath)
+	return fullPath, nil
 }
 
 func splitNonEmptyLines(value string) []string {

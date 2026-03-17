@@ -34,7 +34,8 @@ type WorkspaceConfig struct {
 }
 
 type WorkflowConfig struct {
-	DefaultReviewRounds int `yaml:"default_review_rounds" json:"default_review_rounds"`
+	DefaultReviewRounds int    `yaml:"default_review_rounds" json:"default_review_rounds"`
+	DefaultRecipe       string `yaml:"default_recipe" json:"default_recipe"`
 }
 
 type BrainConfig struct {
@@ -98,6 +99,7 @@ func DefaultConfig() Config {
 		},
 		Workflow: WorkflowConfig{
 			DefaultReviewRounds: 6,
+			DefaultRecipe:       workflowRecipeSpecReviewLoop,
 		},
 		Brain: BrainConfig{
 			Provider:           "claude",

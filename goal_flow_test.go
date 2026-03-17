@@ -541,6 +541,317 @@ func TestGoalFailureBlocksWorkflowWithoutBrain(t *testing.T) {
 	}
 }
 
+func TestSpecWorkflowSupportsCrossCritiqueRecipe(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+	cfg.Team = []TeamMemberConfig{
+		{
+			Name:        "spec-1",
+			Provider:    "claude",
+			Role:        "spec_creator",
+			Count:       1,
+			Description: "Creates technical specifications",
+		},
+		{
+			Name:        "review-codex",
+			Provider:    "codex",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications for implementation readiness",
+		},
+		{
+			Name:        "review-claude",
+			Provider:    "claude",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications from a second perspective",
+		},
+	}
+	cfg.Agents = map[string]AgentConfig{
+		"spec-1": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-codex": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-claude": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+	}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"spec-1":        &scriptedAgent{name: "spec-1", responses: []string{"initial spec", "final consolidation summary"}, delay: 20 * time.Millisecond, available: true},
+		"review-codex":  &scriptedAgent{name: "review-codex", responses: []string{"VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent.", "VERDICT: PASS\n\nThe peer review is rigorous enough for the spec creator to rely on."}, delay: 20 * time.Millisecond, available: true},
+		"review-claude": &scriptedAgent{name: "review-claude", responses: []string{"VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent.", "VERDICT: PASS\n\nThe peer review is rigorous enough for the spec creator to rely on."}, delay: 20 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	goal, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:          "B3 spec",
+		Description:    "Create and review a technical spec document",
+		WorkflowRecipe: workflowRecipeSpecCrossCritiqueLoop,
+	})
+	if err != nil {
+		t.Fatalf("SubmitGoal() error = %v", err)
+	}
+
+	waitFor(t, 3*time.Second, func() bool {
+		current, _, _, err := coordinator.GetGoal(goal.ID)
+		return err == nil && current.Status == GoalCompleted
+	})
+
+	current, plan, tasks, err := coordinator.GetGoal(goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if current.Status != GoalCompleted {
+		t.Fatalf("expected goal completed, got %s with snapshot %#v", current.Status, coordinator.Snapshot())
+	}
+	if current.WorkflowRecipe != workflowRecipeSpecCrossCritiqueLoop {
+		t.Fatalf("expected workflow recipe %q, got %q", workflowRecipeSpecCrossCritiqueLoop, current.WorkflowRecipe)
+	}
+	if len(tasks) != 6 {
+		t.Fatalf("expected prepare, dual review, dual critique, and consolidation tasks, got %d", len(tasks))
+	}
+	if plan == nil || len(plan.Phases) != 4 {
+		t.Fatalf("expected prepare, review, critique, and consolidation phases, got %#v", plan)
+	}
+	if plan.Phases[2].Title != "Cross Critique Round 1" {
+		t.Fatalf("expected cross critique phase, got %q", plan.Phases[2].Title)
+	}
+}
+
+func TestCrossCritiqueRecipeStartsWithPreparationOnly(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+	cfg.Team = []TeamMemberConfig{
+		{
+			Name:        "spec-1",
+			Provider:    "claude",
+			Role:        "spec_creator",
+			Count:       1,
+			Description: "Creates technical specifications",
+		},
+		{
+			Name:        "review-codex",
+			Provider:    "codex",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications for implementation readiness",
+		},
+		{
+			Name:        "review-claude",
+			Provider:    "claude",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications from a second perspective",
+		},
+	}
+	cfg.Agents = map[string]AgentConfig{
+		"spec-1": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-codex": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-claude": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+	}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"spec-1":        &scriptedAgent{name: "spec-1", responses: []string{"created spec"}, delay: 250 * time.Millisecond, available: true},
+		"review-codex":  &scriptedAgent{name: "review-codex", responses: []string{"VERDICT: PASS\n\nLooks good."}, delay: 20 * time.Millisecond, available: true},
+		"review-claude": &scriptedAgent{name: "review-claude", responses: []string{"VERDICT: PASS\n\nLooks good."}, delay: 20 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	goal, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:          "B4 spec",
+		Description:    "Create and review a technical spec document",
+		WorkflowRecipe: workflowRecipeSpecCrossCritiqueLoop,
+	})
+	if err != nil {
+		t.Fatalf("SubmitGoal() error = %v", err)
+	}
+
+	current, plan, tasks, err := coordinator.GetGoal(goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if current.Status != GoalActive {
+		t.Fatalf("expected active goal immediately after submit, got %s", current.Status)
+	}
+	if plan == nil || len(plan.Phases) != 4 {
+		t.Fatalf("expected four planned phases, got %#v", plan)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected only preparation task created initially, got %d", len(tasks))
+	}
+	if tasks[0].AssignedTo != "spec-1" {
+		t.Fatalf("expected preparation task assigned to spec creator, got %q", tasks[0].AssignedTo)
+	}
+	if !strings.Contains(tasks[0].DiscussionFile, "spec-1__spec-creator__round-00__prepare-spec") {
+		t.Fatalf("unexpected preparation discussion file %q", tasks[0].DiscussionFile)
+	}
+}
+
+func TestReviewPromptIncludesDiscussionReferences(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+	cfg.Team = []TeamMemberConfig{
+		{
+			Name:        "spec-1",
+			Provider:    "claude",
+			Role:        "spec_creator",
+			Count:       1,
+			Description: "Creates technical specifications",
+		},
+		{
+			Name:        "review-codex",
+			Provider:    "codex",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications for implementation readiness",
+		},
+		{
+			Name:        "review-claude",
+			Provider:    "claude",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications from a second perspective",
+		},
+	}
+	cfg.Agents = map[string]AgentConfig{
+		"spec-1": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-codex": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-claude": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+	}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"spec-1":        &scriptedAgent{name: "spec-1", responses: []string{"created spec"}, delay: 20 * time.Millisecond, available: true},
+		"review-codex":  &scriptedAgent{name: "review-codex", responses: []string{"VERDICT: PASS\n\nLooks good."}, delay: 250 * time.Millisecond, available: true},
+		"review-claude": &scriptedAgent{name: "review-claude", responses: []string{"VERDICT: PASS\n\nLooks good."}, delay: 250 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	goal, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:          "B5 spec",
+		Description:    "Create and review a technical spec document",
+		WorkflowRecipe: workflowRecipeSpecCrossCritiqueLoop,
+	})
+	if err != nil {
+		t.Fatalf("SubmitGoal() error = %v", err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		_, _, tasks, err := coordinator.GetGoal(goal.ID)
+		if err != nil {
+			return false
+		}
+		return len(tasks) >= 3
+	})
+
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+
+	var prepTask *Task
+	var reviewTask *Task
+	for _, task := range coordinator.tasks {
+		if task.GoalID != goal.ID {
+			continue
+		}
+		if strings.Contains(task.Title, "Prepare") {
+			prepTask = task
+		}
+		if strings.Contains(task.Title, "Adversarial Review") && task.AssignedTo == "review-codex" {
+			reviewTask = task
+		}
+	}
+	if prepTask == nil || reviewTask == nil {
+		t.Fatalf("expected prep and review tasks, got prep=%v review=%v", prepTask != nil, reviewTask != nil)
+	}
+	prompt := coordinator.buildAgentPromptLocked(reviewTask, coordinator.agentState[reviewTask.AssignedTo], nil)
+	if !strings.Contains(prompt, prepTask.DiscussionFile) {
+		t.Fatalf("expected prompt to reference dependency discussion file %q, got %q", prepTask.DiscussionFile, prompt)
+	}
+	if !strings.Contains(prompt, "specs/b5-spec-spec.md") {
+		t.Fatalf("expected prompt to reference spec file, got %q", prompt)
+	}
+	if !strings.Contains(prompt, reviewTask.DiscussionFile) {
+		t.Fatalf("expected prompt to reference current discussion file %q, got %q", reviewTask.DiscussionFile, prompt)
+	}
+}
+
 func TestSpecWorkflowAutoCompletesQuiescentArtifactTask(t *testing.T) {
 	prevTick := workflowTickInterval
 	prevQuiet := fileArtifactQuietThreshold

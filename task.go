@@ -48,6 +48,7 @@ type Task struct {
 	RevisionOf         string     `json:"revision_of,omitempty"`
 	RevisionFeedback   string     `json:"revision_feedback,omitempty"`
 	RevisionCount      int        `json:"revision_count,omitempty"`
+	DiscussionFile     string     `json:"discussion_file,omitempty"`
 	FilesTouched       []string   `json:"files_touched,omitempty"`
 	Priority           int        `json:"priority,omitempty"`
 	PlanPhase          int        `json:"plan_phase,omitempty"`

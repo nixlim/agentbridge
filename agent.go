@@ -136,6 +136,15 @@ func buildWrappedPrompt(workspacePath string, forwarded []string, dependencySumm
 	builder.WriteString(fmt.Sprintf("You are working in the directory: %s\n", workspacePath))
 	builder.WriteString("This is a shared workspace with another AI agent.\n")
 	builder.WriteString("Do not delete or overwrite files without being asked to.\n\n")
+	builder.WriteString("Git restrictions:\n")
+	builder.WriteString("- You may only run git status/add/diff/commit against files inside this shared workspace.\n")
+	builder.WriteString("- Do not create commits that include files outside this shared workspace.\n")
+	builder.WriteString("- Never run git push.\n\n")
+	if task != nil && task.DiscussionFile != "" {
+		builder.WriteString("Required discussion file:\n")
+		builder.WriteString(task.DiscussionFile)
+		builder.WriteString("\n\n")
+	}
 
 	if len(dependencySummaries) > 0 {
 		builder.WriteString("Completed dependency context:\n")

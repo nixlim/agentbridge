@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -199,5 +201,71 @@ func TestHTTPGoalSubmissionIntegration(t *testing.T) {
 	}
 	if len(plan.Phases) != 1 {
 		t.Fatalf("expected one plan phase, got %d", len(plan.Phases))
+	}
+}
+
+func TestHTTPWorkspaceUploadIntegration(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"impl-1": &scriptedAgent{name: "impl-1", responses: []string{"implemented over HTTP"}, delay: 20 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	server := httptest.NewServer(NewServer(coordinator).Handler())
+	defer server.Close()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	if err := writer.WriteField("target_dir", "sources"); err != nil {
+		t.Fatalf("WriteField() error = %v", err)
+	}
+	part, err := writer.CreateFormFile("files", "input.txt")
+	if err != nil {
+		t.Fatalf("CreateFormFile() error = %v", err)
+	}
+	if _, err := part.Write([]byte("source material")); err != nil {
+		t.Fatalf("part.Write() error = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer.Close() error = %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/workspace/files", body)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("upload request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d", http.StatusCreated, resp.StatusCode)
+	}
+
+	data, err := os.ReadFile(filepath.Join(cfg.Workspace.Path, "sources", "input.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(data) != "source material" {
+		t.Fatalf("uploaded file content = %q, want %q", string(data), "source material")
 	}
 }
