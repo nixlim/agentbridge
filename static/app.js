@@ -194,15 +194,11 @@ function initTheme() {
   const saved = localStorage.getItem("agentbridge-theme");
   if (saved === "light") {
     document.body.classList.add("light-theme");
-    refs.themeToggle.textContent = "Dark";
-  } else {
-    refs.themeToggle.textContent = "Light";
   }
   refs.themeToggle.addEventListener("click", () => {
     document.body.classList.toggle("light-theme");
     const isLight = document.body.classList.contains("light-theme");
     localStorage.setItem("agentbridge-theme", isLight ? "light" : "dark");
-    refs.themeToggle.textContent = isLight ? "Dark" : "Light";
   });
 }
 
@@ -500,7 +496,7 @@ function resolveTaskTitle(taskId) {
 /* ---- Tabs ---- */
 
 function initTabs() {
-  const tabs = document.querySelectorAll(".tab[data-tab]");
+  const tabs = document.querySelectorAll(".sidebar-link[data-tab]");
   tabs.forEach((tab) => {
     tab.addEventListener("click", () => {
       tabs.forEach((entry) => entry.classList.remove("active"));
@@ -513,7 +509,7 @@ function initTabs() {
 }
 
 function switchToTab(tabName) {
-  const tabs = document.querySelectorAll(".tab[data-tab]");
+  const tabs = document.querySelectorAll(".sidebar-link[data-tab]");
   tabs.forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.tab === tabName);
   });
@@ -1323,7 +1319,7 @@ function renderTasks() {
   });
 
   const activeCount = groups.running.length + groups.pending.length + groups.review.length;
-  refs.tabTasksCount.textContent = activeCount > 0 ? `(${activeCount})` : "";
+  refs.tabTasksCount.textContent = activeCount > 0 ? `${activeCount}` : "";
 
   let hasAny = false;
   Object.entries(groups).forEach(([status, tasks]) => {

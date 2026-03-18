@@ -15,68 +15,98 @@
 
   <div class="shell">
 
-    <div class="topbar">
-      <span class="topbar-title">AgentBridge</span>
-      <div class="topbar-item">
-        <span id="connection-dot" class="topbar-dot"></span>
-        <span id="connection-label">disconnected</span>
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand">
+        <span class="sidebar-logo">AB</span>
+        <span class="sidebar-title">AgentBridge</span>
       </div>
-      <div class="topbar-divider"></div>
-      <div class="topbar-item">
-        <label>Workflow</label>
-        <span id="brain-provider-label">deterministic</span>
-      </div>
-      <div class="topbar-item">
-        <label>Workspace</label>
-        <span id="workspace-path">unknown</span>
-      </div>
-      <div class="topbar-spacer"></div>
-      <button id="theme-toggle" type="button" class="theme-toggle">Light</button>
-    </div>
-
-    <div id="goalbar" class="goalbar empty">
-      <div class="goalbar-info" style="position:relative">
-        <span id="goal-title" class="goalbar-title">No active goal</span>
-        <span id="goal-status" class="goalbar-status"></span>
-        <div id="workflow-stepper"></div>
-        <button id="goal-history-toggle" type="button" class="goal-history-toggle hidden">History</button>
-        <div id="goal-history-dropdown" class="goal-history-dropdown hidden"></div>
-      </div>
-      <div class="goalbar-progress">
-        <div class="progress-track">
-          <div id="goal-progress-bar" class="progress-bar"></div>
+      <nav class="sidebar-nav">
+        <button class="sidebar-link active" data-tab="overview">
+          <span class="sidebar-icon">&#x25C9;</span>
+          <span class="sidebar-label">Overview</span>
+        </button>
+        <button class="sidebar-link" data-tab="plan">
+          <span class="sidebar-icon">&#x2630;</span>
+          <span class="sidebar-label">Plan</span>
+        </button>
+        <button class="sidebar-link" data-tab="tasks">
+          <span class="sidebar-icon">&#x26A1;</span>
+          <span class="sidebar-label">Tasks</span>
+          <span id="tab-tasks-count" class="sidebar-badge"></span>
+        </button>
+        <button class="sidebar-link" data-tab="messages">
+          <span class="sidebar-icon">&#x25C6;</span>
+          <span class="sidebar-label">Messages</span>
+        </button>
+        <button class="sidebar-link" data-tab="workspace">
+          <span class="sidebar-icon">&#x229E;</span>
+          <span class="sidebar-label">Workspace</span>
+        </button>
+        <button class="sidebar-link" data-tab="controls">
+          <span class="sidebar-icon">&#x25B6;</span>
+          <span class="sidebar-label">Launch</span>
+        </button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="sidebar-status">
+          <span id="connection-dot" class="topbar-dot"></span>
+          <span id="connection-label">disconnected</span>
         </div>
-        <span id="goal-progress-label" class="progress-label">0 / 0</span>
+        <button id="theme-toggle" type="button" class="sidebar-theme-btn">&#x25D0;</button>
       </div>
-      <div class="goalbar-actions">
-        <button id="start-goal" type="button" class="btn-sm hidden">Start</button>
-        <button id="stop-goal" type="button" class="btn-sm hidden">Stop</button>
-        <button id="resume-goal" type="button" class="btn-sm hidden">Resume</button>
-        <button id="delete-goal" type="button" class="btn-danger btn-sm hidden">Delete</button>
+    </aside>
+
+    <div class="main-area">
+      <header class="header">
+        <div class="header-left">
+          <div id="goalbar" class="header-goal empty" style="position:relative">
+            <span id="goal-title" class="header-goal-title">No active goal</span>
+            <span id="goal-status" class="header-goal-status"></span>
+            <button id="goal-history-toggle" type="button" class="goal-history-toggle hidden">History</button>
+            <div id="goal-history-dropdown" class="goal-history-dropdown hidden"></div>
+          </div>
+        </div>
+        <div class="header-center">
+          <div id="workflow-stepper"></div>
+        </div>
+        <div class="header-right">
+          <div class="header-progress">
+            <div class="progress-track">
+              <div id="goal-progress-bar" class="progress-bar"></div>
+            </div>
+            <span id="goal-progress-label" class="progress-label">0 / 0</span>
+          </div>
+          <div class="header-actions">
+            <button id="start-goal" type="button" class="btn-sm hidden">Start</button>
+            <button id="stop-goal" type="button" class="btn-sm hidden">Stop</button>
+            <button id="resume-goal" type="button" class="btn-sm hidden">Resume</button>
+            <button id="delete-goal" type="button" class="btn-danger btn-sm hidden">Delete</button>
+          </div>
+          <div class="header-meta">
+            <span class="header-meta-item">
+              <label>Workflow</label>
+              <span id="brain-provider-label">deterministic</span>
+            </span>
+            <span class="header-meta-item">
+              <label>Workspace</label>
+              <span id="workspace-path">unknown</span>
+            </span>
+          </div>
+        </div>
+      </header>
+
+      <div id="gate-panel" class="callout hidden" style="margin:0 24px">
+        <strong id="gate-title">Human Decision Required</strong>
+        <p id="gate-message"></p>
+        <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-top:8px">
+          <textarea id="gate-feedback" rows="2" placeholder="Optional feedback or corrections"></textarea>
+          <div></div>
+          <button id="gate-approve" type="button" class="btn-primary btn-sm">Approve</button>
+          <button id="gate-reject" type="button" class="btn-danger btn-sm">Reject</button>
+        </div>
       </div>
-    </div>
 
-    <div id="gate-panel" class="callout hidden" style="margin:0 20px 0 20px">
-      <strong id="gate-title">Human Decision Required</strong>
-      <p id="gate-message"></p>
-      <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-top:8px">
-        <textarea id="gate-feedback" rows="2" placeholder="Optional feedback or corrections"></textarea>
-        <div></div>
-        <button id="gate-approve" type="button" class="btn-primary btn-sm">Approve</button>
-        <button id="gate-reject" type="button" class="btn-danger btn-sm">Reject</button>
-      </div>
-    </div>
-
-    <nav class="tabbar">
-      <button class="tab active" data-tab="overview">&#x25C9; Overview</button>
-      <button class="tab" data-tab="plan">&#x2630; Plan</button>
-      <button class="tab" data-tab="tasks">&#x26A1; Tasks <span id="tab-tasks-count" class="tab-count"></span></button>
-      <button class="tab" data-tab="messages">&#x25C6; Messages</button>
-      <button class="tab" data-tab="workspace">&#x229E; Workspace</button>
-      <button class="tab" data-tab="controls">&#x25B6; Launch</button>
-    </nav>
-
-    <div class="tab-panels">
+      <main class="content">
 
       <!-- Overview: Coordinator + Agents -->
       <div class="tab-panel active" data-tab="overview">
@@ -232,6 +262,7 @@
         </div>
       </div>
 
+      </main>
     </div>
   </div>
 
