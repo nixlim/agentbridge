@@ -320,10 +320,11 @@ function renderGoalBar() {
   const completed = goalTasks.filter((task) => task.status === "completed").length;
   const total = goalTasks.length;
   const percent = total === 0 ? 0 : Math.round((completed / total) * 100);
+  const displayStatus = effectiveGoalStatus(goal);
 
   refs.goalTitle.textContent = goal.title;
 
-  const parts = [goal.status];
+  const parts = [displayStatus];
   if (state.workflow.stage) parts.push(state.workflow.stage.replaceAll("_", " "));
   if (goal.workflow_recipe) parts.push(formatRecipeLabel(goal.workflow_recipe));
   if (state.workflow.recipe === "spec-review-loop" || state.workflow.recipe === "spec-cross-critique-loop") {
@@ -344,7 +345,7 @@ function renderGoalBar() {
       : `phase ${state.workflow.current_phase_number}`;
     parts.push(state.workflow.current_phase_title ? `${phaseLabel} ${state.workflow.current_phase_title}` : phaseLabel);
   }
-  if (goal.summary && (goal.status === "blocked" || goal.status === "failed" || goal.status === "stopped")) {
+  if (goal.summary && isTerminalGoalStatus(displayStatus)) {
     parts.push(clampText(goal.summary, 220));
   } else if (goal.description) {
     parts.push(clampText(goal.description, 180));
@@ -376,6 +377,18 @@ function canResumeGoal(goal) {
 
 function canDeleteGoal(goal) {
   return Boolean(goal);
+}
+
+function effectiveGoalStatus(goal) {
+  if (!goal) return "";
+  if (isPlanCompleteForGoal(goal.id) && ["blocked", "failed", "stopped", "completed"].includes(goal.status)) {
+    return "finished";
+  }
+  return goal.status;
+}
+
+function isTerminalGoalStatus(status) {
+  return ["blocked", "failed", "stopped", "completed", "finished"].includes(status);
 }
 
 function isPlanCompleteForGoal(goalID) {

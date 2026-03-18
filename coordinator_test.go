@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -352,6 +353,22 @@ func TestDetectIntegrationConflictIgnoresCrossCritiqueTasks(t *testing.T) {
 
 	if got := coordinator.detectIntegrationConflictLocked(current, []string{"specs/b4-spec-spec.md"}); got != "" {
 		t.Fatalf("expected no integration conflict for cross-critique task, got %q", got)
+	}
+}
+
+func TestBuildSpecCritiqueTaskDescriptionIsNotPassFail(t *testing.T) {
+	t.Parallel()
+
+	coordinator := NewCoordinator(DefaultConfig(), map[string]Agent{}, nil, NewWorkspace(WorkspaceConfig{Path: t.TempDir(), InitGit: false}), nil, NewWebSocketHub())
+	desc := coordinator.buildSpecCritiqueTaskDescription(&Goal{Title: "B4 Spec"}, "specs/b4-spec-spec.md", 4, 1, 2, 2)
+
+	if strings.Contains(desc, "VERDICT: PASS") || strings.Contains(desc, "VERDICT: FAIL") {
+		t.Fatalf("expected critique prompt without verdict framing, got %q", desc)
+	}
+	for _, heading := range []string{"STRENGTHS", "MISSED ISSUES", "WEAK OBJECTIONS", "DISAGREEMENTS", "EXTRA QUESTIONS"} {
+		if !strings.Contains(desc, heading) {
+			t.Fatalf("expected critique prompt to contain %q, got %q", heading, desc)
+		}
 	}
 }
 
