@@ -27,6 +27,42 @@
   --radius-lg: 8px;
 }
 
+/* ---- Light Theme ---- */
+
+body.light-theme {
+  --bg: #f5f5f5;
+  --surface: #ffffff;
+  --surface-raised: #fafafa;
+  --surface-overlay: #f0f0f0;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.15);
+  --text: #1a1a1a;
+  --text-secondary: #555;
+  --text-muted: #999;
+  --accent: #2a8a98;
+  --accent-dim: rgba(42, 138, 152, 0.1);
+  --accent-border: rgba(42, 138, 152, 0.3);
+  --danger: #c0392b;
+  --danger-dim: rgba(192, 57, 43, 0.08);
+  --danger-border: rgba(192, 57, 43, 0.25);
+  --success: #27ae60;
+  --success-dim: rgba(39, 174, 96, 0.08);
+  --success-border: rgba(39, 174, 96, 0.25);
+  --warning: #d4912a;
+  --warning-dim: rgba(212, 145, 42, 0.08);
+  --warning-border: rgba(212, 145, 42, 0.25);
+  --purple: #8e44ad;
+  --purple-dim: rgba(142, 68, 173, 0.08);
+}
+
+body.light-theme ::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+body.light-theme ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
 *, *::before, *::after {
   box-sizing: border-box;
 }
@@ -152,6 +188,24 @@ h1, h2, h3, p {
   background: rgba(59, 158, 173, 0.25);
 }
 
+/* ---- Theme Toggle ---- */
+
+.theme-toggle {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.theme-toggle:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-overlay);
+}
+
 /* ---- Goal Bar ---- */
 
 .goalbar {
@@ -225,6 +279,120 @@ h1, h2, h3, p {
   gap: 6px;
   flex-shrink: 0;
   justify-self: end;
+}
+
+/* ---- Goal History ---- */
+
+.goal-history-toggle {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 2px 4px;
+  text-decoration: underline;
+}
+
+.goal-history-toggle:hover {
+  color: var(--text-secondary);
+  background: none;
+}
+
+.goal-history-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 50;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 6px 0;
+  min-width: 280px;
+  max-height: 240px;
+  overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.goal-history-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+.goal-history-item:hover {
+  background: var(--surface-overlay);
+}
+
+.goal-history-item .goal-history-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-right: 8px;
+}
+
+.goal-history-item.current {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---- Workflow Stepper ---- */
+
+.workflow-stepper {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-top: 4px;
+}
+
+.stepper-step {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.stepper-step .step-label {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-overlay);
+  transition: all 150ms ease;
+}
+
+.stepper-step.active .step-label {
+  background: var(--accent-dim);
+  border-color: var(--accent-border);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.stepper-step.completed .step-label {
+  background: var(--success-dim);
+  border-color: var(--success-border);
+  color: var(--success);
+}
+
+.stepper-arrow {
+  color: var(--text-muted);
+  font-size: 10px;
+  margin: 0 3px;
+}
+
+.stepper-round {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: 8px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
 }
 
 /* ---- Tab Bar ---- */
@@ -358,6 +526,13 @@ textarea {
 .form-grid button[type="submit"],
 .form-grid .full {
   grid-column: 1 / -1;
+}
+
+.form-hint {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 4px 0;
 }
 
 /* ---- Buttons ---- */
@@ -533,6 +708,31 @@ button[type="submit"]:hover,
   gap: 4px;
 }
 
+/* ---- Verdict Badges ---- */
+
+.verdict-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.verdict-pass {
+  background: var(--success-dim);
+  border: 1px solid var(--success-border);
+  color: var(--success);
+}
+
+.verdict-fail {
+  background: var(--danger-dim);
+  border: 1px solid var(--danger-border);
+  color: var(--danger);
+}
+
 /* ---- Status dot ---- */
 
 .dot {
@@ -675,6 +875,34 @@ button[type="submit"]:hover,
 .group-count {
   font-weight: 400;
   opacity: 0.6;
+}
+
+/* ---- Collapsible Content ---- */
+
+.collapsible-content {
+  position: relative;
+  max-height: 4.5em;
+  overflow: hidden;
+  transition: max-height 200ms ease;
+}
+
+.collapsible-content.expanded {
+  max-height: none;
+}
+
+.collapsible-toggle {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 11px;
+  padding: 2px 0;
+  cursor: pointer;
+  margin-top: 2px;
+}
+
+.collapsible-toggle:hover {
+  color: var(--text);
+  background: none;
 }
 
 /* ---- Plan / Phases ---- */
@@ -830,10 +1058,184 @@ button[type="submit"]:hover,
   font-weight: 600;
 }
 
+.tree-entry.file {
+  cursor: pointer;
+}
+
+.tree-entry.file:hover {
+  color: var(--accent);
+}
+
 .tree-children {
   padding-left: 16px;
   border-left: 1px solid var(--border);
   margin-left: 4px;
+}
+
+/* ---- File Viewer Overlay ---- */
+
+.file-viewer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+
+.file-viewer-panel {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  width: 100%;
+  max-width: 900px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.file-viewer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.file-viewer-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-viewer-close {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.file-viewer-close:hover {
+  border-color: var(--border-strong);
+}
+
+.file-viewer-content {
+  padding: 16px;
+  overflow: auto;
+  flex: 1;
+}
+
+.file-viewer-content pre {
+  font-family: "JetBrains Mono", "SF Mono", monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* ---- Toast Notifications ---- */
+
+.toast-container {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  font-size: 12px;
+  color: var(--text);
+  min-width: 200px;
+  max-width: 380px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  animation: toastIn 200ms ease forwards;
+}
+
+.toast.toast-success {
+  border-left: 3px solid var(--success);
+}
+
+.toast.toast-error {
+  border-left: 3px solid var(--danger);
+}
+
+.toast.toast-info {
+  border-left: 3px solid var(--accent);
+}
+
+.toast.toast-out {
+  animation: toastOut 300ms ease forwards;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes toastOut {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(20px); }
+}
+
+/* ---- Reject Modal ---- */
+
+.reject-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.reject-modal {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  width: 400px;
+  max-width: 90vw;
+}
+
+.reject-modal h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--text);
+}
+
+.reject-modal textarea {
+  width: 100%;
+  margin-bottom: 12px;
+}
+
+.reject-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 /* ---- Callout (human input) ---- */

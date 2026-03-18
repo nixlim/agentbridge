@@ -42,6 +42,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	staticFS, _ := fs.Sub(staticFiles, "static")
 
+	s.router.HandleFunc("/healthz", s.handleHealthz).Methods(http.MethodGet)
 	s.router.HandleFunc("/", s.handleIndex).Methods(http.MethodGet)
 	s.router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.FS(staticFS)))).Methods(http.MethodGet)
 	s.router.HandleFunc("/ws", s.handleWebSocket).Methods(http.MethodGet)
@@ -70,6 +71,10 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/api/workspace/files", s.handleWorkspaceFiles).Methods(http.MethodGet, http.MethodPost)
 	s.router.HandleFunc("/api/workspace/files/{path:.*}", s.handleWorkspaceFile).Methods(http.MethodGet)
 	s.router.HandleFunc("/api/workspace/diff", s.handleWorkspaceDiff).Methods(http.MethodGet)
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -108,107 +113,137 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			switch action {
 			case "send_task":
 				var req CreateTaskRequest
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_, _ = s.coordinator.CreateTask(req)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if _, err := s.coordinator.CreateTask(req); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "send_message":
 				var req struct {
 					To      string `json:"to"`
 					Content string `json:"content"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.SendHumanMessage(req.To, req.Content)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.SendHumanMessage(req.To, req.Content); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "approve_review":
 				var req struct {
 					TaskID string `json:"task_id"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.ApproveTask(req.TaskID)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.ApproveTask(req.TaskID); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "reject_review":
 				var req struct {
 					TaskID string `json:"task_id"`
 					Reason string `json:"reason"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.RejectTask(req.TaskID, req.Reason)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.RejectTask(req.TaskID, req.Reason); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "cancel_task":
 				var req struct {
 					TaskID string `json:"task_id"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.CancelTask(req.TaskID)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.CancelTask(req.TaskID); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "reset_agent":
 				var req struct {
 					Agent string `json:"agent"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.ResetAgent(req.Agent)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.ResetAgent(req.Agent); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "submit_goal":
 				var req CreateGoalRequest
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_, _ = s.coordinator.SubmitGoal(req)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if _, err := s.coordinator.SubmitGoal(req); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "start_goal":
 				var req struct {
 					GoalID string `json:"goal_id"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.StartGoal(req.GoalID)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.StartGoal(req.GoalID); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "stop_goal":
 				var req struct {
 					GoalID string `json:"goal_id"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.StopGoal(req.GoalID)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.StopGoal(req.GoalID); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "override_assignment":
 				var req struct {
 					TaskID   string `json:"task_id"`
 					NewAgent string `json:"new_agent"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.ReassignTask(req.TaskID, req.NewAgent, "manual override")
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.ReassignTask(req.TaskID, req.NewAgent, "manual override"); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "pause_agent":
 				var req struct {
 					Agent string `json:"agent"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.PauseAgent(req.Agent)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.PauseAgent(req.Agent); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "resume_agent":
 				var req struct {
 					Agent string `json:"agent"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.ResumeAgent(req.Agent)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.ResumeAgent(req.Agent); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "resume_goal":
 				var req struct {
 					GoalID string `json:"goal_id"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.ResumeGoal(req.GoalID)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.ResumeGoal(req.GoalID); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "delete_goal":
 				var req struct {
 					GoalID string `json:"goal_id"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.DeleteGoal(req.GoalID)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.DeleteGoal(req.GoalID); err != nil {
+					sendWSError(conn, action, err)
 				}
 			case "kill_goal":
 				var req struct {
 					GoalID string `json:"goal_id"`
 				}
-				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.StopGoal(req.GoalID)
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.StopGoal(req.GoalID); err != nil {
+					sendWSError(conn, action, err)
 				}
 			}
 		}
@@ -490,18 +525,19 @@ func (s *Server) handleWorkspaceFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		uploaded := make([]string, 0, len(files))
 		for _, header := range files {
-			src, err := header.Open()
-			if err != nil {
-				writeError(w, http.StatusBadRequest, err)
-				return
-			}
-			defer src.Close()
-			filename := filepath.Base(header.Filename)
-			relPath := filename
-			if targetDir != "" {
-				relPath = filepath.Join(targetDir, filename)
-			}
-			writtenPath, err := s.coordinator.workspace.WriteFile(relPath, src)
+			writtenPath, err := func() (string, error) {
+				src, err := header.Open()
+				if err != nil {
+					return "", err
+				}
+				defer src.Close()
+				filename := filepath.Base(header.Filename)
+				relPath := filename
+				if targetDir != "" {
+					relPath = filepath.Join(targetDir, filename)
+				}
+				return s.coordinator.workspace.WriteFile(relPath, src)
+			}()
 			if err != nil {
 				writeError(w, http.StatusBadRequest, err)
 				return
@@ -540,6 +576,14 @@ func (s *Server) handleWorkspaceDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"diff": diff})
+}
+
+func sendWSError(conn *websocket.Conn, action string, err error) {
+	_ = conn.WriteJSON(map[string]string{
+		"event":  "error",
+		"action": action,
+		"error":  err.Error(),
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value interface{}) {

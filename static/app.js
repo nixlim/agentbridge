@@ -13,6 +13,7 @@ const state = {
   messageTypeFilter: new Set(),
   activeTaskInteractionId: "",
   pendingTaskRender: false,
+  goalHistoryOpen: false,
 };
 
 const refs = {
@@ -67,19 +68,260 @@ const refs = {
   planInput: document.getElementById("plan-input"),
   humanInputPanel: document.getElementById("human-input-panel"),
   tabTasksCount: document.getElementById("tab-tasks-count"),
+  toastContainer: document.getElementById("toast-container"),
+  themeToggle: document.getElementById("theme-toggle"),
+  workflowStepper: document.getElementById("workflow-stepper"),
+  goalHistoryToggle: document.getElementById("goal-history-toggle"),
+  goalHistoryDropdown: document.getElementById("goal-history-dropdown"),
 };
 
 const messageTypes = [
-  "human→coordinator",
-  "coordinator→agent",
-  "agent→coordinator",
-  "agent→agent",
-  "coordinator→human",
+  "human\u2192coordinator",
+  "coordinator\u2192agent",
+  "agent\u2192coordinator",
+  "agent\u2192agent",
+  "coordinator\u2192human",
   "system",
 ];
 
 let socket;
 let reconnectDelay = 1000;
+
+/* ---- Toast Notification System ---- */
+
+function showToast(message, type) {
+  type = type || "info";
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  refs.toastContainer.appendChild(toast);
+  window.setTimeout(() => {
+    toast.classList.add("toast-out");
+    toast.addEventListener("animationend", () => toast.remove());
+  }, 4000);
+}
+
+/* ---- Reject Modal ---- */
+
+function showRejectModal(taskId) {
+  const overlay = document.createElement("div");
+  overlay.className = "reject-modal-overlay";
+  const modal = document.createElement("div");
+  modal.className = "reject-modal";
+  const heading = document.createElement("h3");
+  heading.textContent = "Reject Task";
+  const textarea = document.createElement("textarea");
+  textarea.rows = 3;
+  textarea.placeholder = "Reason for rejection";
+  const actions = document.createElement("div");
+  actions.className = "reject-modal-actions";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "btn-sm";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.addEventListener("click", () => overlay.remove());
+  const submitBtn = document.createElement("button");
+  submitBtn.type = "button";
+  submitBtn.className = "btn-sm btn-primary";
+  submitBtn.textContent = "Reject";
+  submitBtn.addEventListener("click", () => {
+    const reason = textarea.value.trim();
+    if (reason) {
+      apiPost(`/api/tasks/${taskId}/reject`, { reason });
+      overlay.remove();
+    }
+  });
+  actions.append(cancelBtn, submitBtn);
+  modal.append(heading, textarea, actions);
+  overlay.appendChild(modal);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+  textarea.focus();
+}
+
+/* ---- File Viewer ---- */
+
+async function openFileViewer(filePath) {
+  try {
+    const response = await fetch(`/api/workspace/files/${encodeURIComponent(filePath)}`);
+    if (!response.ok) {
+      showToast(`Failed to load file: ${response.status}`, "error");
+      return;
+    }
+    const content = await response.text();
+    const overlay = document.createElement("div");
+    overlay.className = "file-viewer-overlay";
+    const panel = document.createElement("div");
+    panel.className = "file-viewer-panel";
+    const header = document.createElement("div");
+    header.className = "file-viewer-header";
+    const title = document.createElement("span");
+    title.className = "file-viewer-title";
+    title.textContent = filePath;
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "file-viewer-close";
+    closeBtn.textContent = "Close";
+    closeBtn.addEventListener("click", () => overlay.remove());
+    header.append(title, closeBtn);
+    const body = document.createElement("div");
+    body.className = "file-viewer-content";
+    const pre = document.createElement("pre");
+    pre.textContent = content;
+    body.appendChild(pre);
+    panel.append(header, body);
+    overlay.appendChild(panel);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+  } catch (err) {
+    showToast(`Error loading file: ${err.message}`, "error");
+  }
+}
+
+/* ---- Theme Toggle ---- */
+
+function initTheme() {
+  const saved = localStorage.getItem("agentbridge-theme");
+  if (saved === "light") {
+    document.body.classList.add("light-theme");
+    refs.themeToggle.textContent = "Dark";
+  } else {
+    refs.themeToggle.textContent = "Light";
+  }
+  refs.themeToggle.addEventListener("click", () => {
+    document.body.classList.toggle("light-theme");
+    const isLight = document.body.classList.contains("light-theme");
+    localStorage.setItem("agentbridge-theme", isLight ? "light" : "dark");
+    refs.themeToggle.textContent = isLight ? "Dark" : "Light";
+  });
+}
+
+/* ---- Collapsible Content Helper ---- */
+
+function makeCollapsible(container, pre) {
+  container.classList.add("collapsible-content");
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "collapsible-toggle";
+  toggle.textContent = "Show more";
+  toggle.addEventListener("click", () => {
+    const expanded = container.classList.toggle("expanded");
+    toggle.textContent = expanded ? "Show less" : "Show more";
+  });
+  // Only add toggle if content actually overflows 3 lines
+  requestAnimationFrame(() => {
+    if (pre.scrollHeight > container.clientHeight + 2) {
+      container.parentNode.insertBefore(toggle, container.nextSibling);
+    } else {
+      container.classList.remove("collapsible-content");
+    }
+  });
+}
+
+/* ---- Verdict Badge Helper ---- */
+
+function extractVerdict(text) {
+  if (!text) return null;
+  const match = text.match(/VERDICT:\s*(PASS|FAIL)/i);
+  return match ? match[1].toUpperCase() : null;
+}
+
+function verdictBadge(verdict) {
+  const badge = document.createElement("span");
+  badge.className = `verdict-badge verdict-${verdict.toLowerCase()}`;
+  badge.textContent = verdict;
+  return badge;
+}
+
+/* ---- Workflow Stepper ---- */
+
+function renderWorkflowStepper() {
+  refs.workflowStepper.textContent = "";
+  const recipe = state.workflow.recipe;
+  if (recipe !== "spec-review-loop" && recipe !== "spec-cross-critique-loop") return;
+
+  let stages;
+  if (recipe === "spec-cross-critique-loop") {
+    stages = ["prepare_spec", "adversarial_review", "cross_critique", "consolidation"];
+  } else {
+    stages = ["prepare_spec", "adversarial_review", "consolidation"];
+  }
+
+  const currentStage = state.workflow.stage || "";
+
+  stages.forEach((stageKey, idx) => {
+    if (idx > 0) {
+      const arrow = document.createElement("span");
+      arrow.className = "stepper-arrow";
+      arrow.textContent = "\u2192";
+      refs.workflowStepper.appendChild(arrow);
+    }
+    const step = document.createElement("span");
+    step.className = "stepper-step";
+    const stageIdx = stages.indexOf(currentStage);
+    if (stageKey === currentStage) {
+      step.classList.add("active");
+    } else if (stageIdx >= 0 && idx < stageIdx) {
+      step.classList.add("completed");
+    }
+    const label = document.createElement("span");
+    label.className = "step-label";
+    label.textContent = stageKey.replaceAll("_", " ");
+    step.appendChild(label);
+    refs.workflowStepper.appendChild(step);
+  });
+
+  // Round indicator
+  const round = state.workflow.review_round || 0;
+  const maxRounds = state.workflow.max_review_rounds || (state.currentGoal ? state.currentGoal.max_review_rounds : 0) || 0;
+  if (round > 0 || maxRounds > 0) {
+    const roundEl = document.createElement("span");
+    roundEl.className = "stepper-round";
+    roundEl.textContent = maxRounds ? `Round ${round}/${maxRounds}` : `Round ${round}`;
+    refs.workflowStepper.appendChild(roundEl);
+  }
+}
+
+/* ---- Goal History ---- */
+
+function renderGoalHistory() {
+  refs.goalHistoryDropdown.textContent = "";
+  if (!state.goals.length) return;
+
+  state.goals.slice().reverse().forEach((goal) => {
+    const item = document.createElement("div");
+    item.className = "goal-history-item";
+    if (state.currentGoal && goal.id === state.currentGoal.id) {
+      item.classList.add("current");
+    }
+    const titleEl = document.createElement("span");
+    titleEl.className = "goal-history-title";
+    titleEl.textContent = goal.title || "(untitled)";
+    const statusEl = document.createElement("span");
+    statusEl.className = `tag ${goalStatusTagClass(goal)}`;
+    statusEl.textContent = effectiveGoalStatus(goal);
+    item.append(titleEl, statusEl);
+    refs.goalHistoryDropdown.appendChild(item);
+  });
+}
+
+function goalStatusTagClass(goal) {
+  const status = effectiveGoalStatus(goal);
+  if (status === "active" || status === "planning") return "tag-accent";
+  if (status === "completed" || status === "finished") return "tag-success";
+  if (status === "failed" || status === "blocked") return "tag-danger";
+  if (status === "stopped") return "tag-warning";
+  return "";
+}
+
+/* ---- Resolve Dependency UUIDs ---- */
+
+function resolveTaskTitle(taskId) {
+  const task = state.tasks.find((t) => t.id === taskId);
+  return task ? task.title : taskId.slice(0, 8);
+}
+
+/* ---- Tabs ---- */
 
 function initTabs() {
   const tabs = document.querySelectorAll(".tab[data-tab]");
@@ -94,8 +336,19 @@ function initTabs() {
   });
 }
 
+function switchToTab(tabName) {
+  const tabs = document.querySelectorAll(".tab[data-tab]");
+  tabs.forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.tab === tabName);
+  });
+  document.querySelectorAll(".tab-panel[data-tab]").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.tab === tabName);
+  });
+}
+
 function init() {
   initTabs();
+  initTheme();
 
   messageTypes.forEach((type) => {
     const chip = document.createElement("button");
@@ -139,11 +392,24 @@ function init() {
   refs.togglePlanEditor.addEventListener("click", togglePlanEditor);
   refs.planForm.addEventListener("submit", submitPlanOverride);
 
+  // Goal history toggle
+  refs.goalHistoryToggle.addEventListener("click", () => {
+    state.goalHistoryOpen = !state.goalHistoryOpen;
+    refs.goalHistoryDropdown.classList.toggle("hidden", !state.goalHistoryOpen);
+    if (state.goalHistoryOpen) renderGoalHistory();
+  });
+  document.addEventListener("click", (e) => {
+    if (state.goalHistoryOpen && !refs.goalHistoryToggle.contains(e.target) && !refs.goalHistoryDropdown.contains(e.target)) {
+      state.goalHistoryOpen = false;
+      refs.goalHistoryDropdown.classList.add("hidden");
+    }
+  });
+
   toggleComposerFields();
   renderHumanInputRequest();
   connectWebSocket();
   window.setInterval(() => {
-    renderAgents();
+    updateAgentTimers();
     renderWorkflowPanel();
     updateTaskTimers();
   }, 1000);
@@ -237,6 +503,11 @@ function renderAll() {
   renderMessages();
   renderWorkspace();
   refreshWorkspace();
+
+  // Default tab: switch to Launch if no active goal
+  if (!state.currentGoal) {
+    switchToTab("controls");
+  }
 }
 
 function beginTaskInteraction(taskId) {
@@ -268,6 +539,25 @@ function updateTaskTimers() {
     node.textContent = node.dataset.taskRunning === "true"
       ? elapsed(timestamp)
       : formatTime(timestamp);
+  });
+}
+
+/* ---- Targeted agent timer updates (change #10) ---- */
+
+function updateAgentTimers() {
+  refs.agentsList.querySelectorAll("[data-agent-timer]").forEach((node) => {
+    const agentName = node.dataset.agentTimer;
+    const activeTask = currentTaskForAgent(agentName);
+    if (activeTask) {
+      node.textContent = `task: ${activeTask.title} \u2022 ${elapsed(activeTask.started_at || activeTask.created_at)}`;
+    } else {
+      node.textContent = "no active task";
+    }
+  });
+  refs.agentsList.querySelectorAll("[data-agent-process]").forEach((node) => {
+    const agentName = node.dataset.agentProcess;
+    const agent = state.agents[agentName];
+    if (agent) node.textContent = formatAgentProcess(agent);
   });
 }
 
@@ -312,6 +602,8 @@ function renderGoalBar() {
     refs.stopGoal.classList.add("hidden");
     refs.resumeGoal.classList.add("hidden");
     refs.deleteGoal.classList.add("hidden");
+    refs.goalHistoryToggle.classList.add("hidden");
+    refs.workflowStepper.textContent = "";
     return;
   }
 
@@ -324,26 +616,25 @@ function renderGoalBar() {
 
   refs.goalTitle.textContent = goal.title;
 
+  // Build simplified status text (stepper handles the stage info now)
   const parts = [displayStatus];
-  if (state.workflow.stage) parts.push(state.workflow.stage.replaceAll("_", " "));
-  if (goal.workflow_recipe) parts.push(formatRecipeLabel(goal.workflow_recipe));
-  if (state.workflow.recipe === "spec-review-loop" || state.workflow.recipe === "spec-cross-critique-loop") {
-    if (state.workflow.review_round || goal.max_review_rounds) {
-      const activeRound = state.workflow.review_round || 0;
-      const maxRounds = goal.max_review_rounds || state.workflow.max_review_rounds || 0;
-      parts.push(maxRounds ? `review round ${activeRound}/${maxRounds}` : `review round ${activeRound}`);
+  if (state.workflow.recipe !== "spec-review-loop" && state.workflow.recipe !== "spec-cross-critique-loop") {
+    if (state.workflow.stage) parts.push(state.workflow.stage.replaceAll("_", " "));
+    if (goal.workflow_recipe) parts.push(formatRecipeLabel(goal.workflow_recipe));
+    if (state.workflow.current_phase_number) {
+      const phaseLabel = state.workflow.total_phases
+        ? `phase ${state.workflow.current_phase_number}/${state.workflow.total_phases}`
+        : `phase ${state.workflow.current_phase_number}`;
+      parts.push(state.workflow.current_phase_title ? `${phaseLabel} ${state.workflow.current_phase_title}` : phaseLabel);
     }
+  } else {
+    if (goal.workflow_recipe) parts.push(formatRecipeLabel(goal.workflow_recipe));
     if (state.workflow.stage_task_total) {
       let progressLabel = "tasks";
       if (state.workflow.stage === "adversarial_review") progressLabel = "reviewers";
       if (state.workflow.stage === "cross_critique") progressLabel = "critiques";
       parts.push(`${progressLabel} ${state.workflow.stage_task_completed || 0}/${state.workflow.stage_task_total} complete`);
     }
-  } else if (state.workflow.current_phase_number) {
-    const phaseLabel = state.workflow.total_phases
-      ? `phase ${state.workflow.current_phase_number}/${state.workflow.total_phases}`
-      : `phase ${state.workflow.current_phase_number}`;
-    parts.push(state.workflow.current_phase_title ? `${phaseLabel} ${state.workflow.current_phase_title}` : phaseLabel);
   }
   if (goal.summary && isTerminalGoalStatus(displayStatus)) {
     parts.push(clampText(goal.summary, 220));
@@ -351,13 +642,18 @@ function renderGoalBar() {
     parts.push(clampText(goal.description, 180));
   }
 
-  refs.goalStatus.textContent = parts.filter(Boolean).join(" • ");
+  refs.goalStatus.textContent = parts.filter(Boolean).join(" \u2022 ");
   refs.goalProgressLabel.textContent = `${completed} / ${total}`;
   refs.goalProgressBar.style.width = `${percent}%`;
   refs.startGoal.classList.toggle("hidden", !canStartGoal(goal));
   refs.stopGoal.classList.toggle("hidden", !canStopGoal(goal));
   refs.resumeGoal.classList.toggle("hidden", !canResumeGoal(goal));
   refs.deleteGoal.classList.toggle("hidden", !canDeleteGoal(goal));
+
+  // Show goal history toggle if there are multiple goals
+  refs.goalHistoryToggle.classList.toggle("hidden", state.goals.length < 2);
+
+  renderWorkflowStepper();
 }
 
 function canStartGoal(goal) {
@@ -446,7 +742,7 @@ function renderTransitions() {
     item.className = "decision-item";
 
     const header = document.createElement("strong");
-    header.textContent = `${formatTime(message.timestamp)} • ${message.content}`;
+    header.textContent = `${formatTime(message.timestamp)} \u2022 ${message.content}`;
     item.appendChild(header);
 
     const meta = [];
@@ -456,7 +752,7 @@ function renderTransitions() {
     if (meta.length) {
       const metaEl = document.createElement("div");
       metaEl.className = "card-meta";
-      metaEl.textContent = meta.join(" • ");
+      metaEl.textContent = meta.join(" \u2022 ");
       item.appendChild(metaEl);
     }
 
@@ -513,7 +809,7 @@ function formatWorkflowMeta(workflow) {
   if (workflow.completed_review_rounds) {
     parts.push(`completed rounds ${workflow.completed_review_rounds}`);
   }
-  return parts.join(" • ");
+  return parts.join(" \u2022 ");
 }
 
 function formatRecipeLabel(recipe) {
@@ -546,16 +842,16 @@ function formatWorkflowStatus(workflow) {
     parts.push(workflow.current_phase_title ? `${phaseLabel} ${workflow.current_phase_title}` : phaseLabel);
   }
   if (workflow.last_error) parts.push(`error: ${clampText(workflow.last_error, 220)}`);
-  return parts.join(" • ");
+  return parts.join(" \u2022 ");
 }
 
 function formatWorkflowProcess(invocation, workflow) {
   if (!invocation) {
     if (workflow && workflow.status === "stopped" && workflow.last_error) {
-      return `Workflow stopped • ${workflow.last_error}`;
+      return `Workflow stopped \u2022 ${workflow.last_error}`;
     }
     if (workflow && workflow.status === "blocked" && workflow.last_error) {
-      return `Workflow blocked • ${workflow.last_error}`;
+      return `Workflow blocked \u2022 ${workflow.last_error}`;
     }
     return "No active worker process telemetry yet.";
   }
@@ -568,7 +864,7 @@ function formatWorkflowProcess(invocation, workflow) {
   }
   if (invocation.trace_id) parts.push(`trace ${String(invocation.trace_id).slice(0, 12)}`);
   if (invocation.error) parts.push(invocation.error);
-  return parts.join(" • ");
+  return parts.join(" \u2022 ");
 }
 
 function formatWorkflowGuidance(workflow, goal) {
@@ -639,7 +935,7 @@ function renderPlan() {
       taskTitle.textContent = plannedTask.title;
       const taskTag = document.createElement("span");
       taskTag.className = "tag";
-      taskTag.textContent = actual ? `${actual.assigned_to} • ${actual.status}` : `${plannedTask.assign_to} • planned`;
+      taskTag.textContent = actual ? `${actual.assigned_to} \u2022 ${actual.status}` : `${plannedTask.assign_to} \u2022 planned`;
       taskHeader.append(taskTitle, taskTag);
 
       const meta = document.createElement("div");
@@ -650,6 +946,12 @@ function renderPlan() {
         tag(plannedTask.review_by ? `review: ${plannedTask.review_by}` : "no review"),
       );
 
+      // Verdict badge for plan tasks
+      if (actual && actual.result) {
+        const verdict = extractVerdict(actual.result);
+        if (verdict) meta.appendChild(verdictBadge(verdict));
+      }
+
       const desc = document.createElement("pre");
       desc.textContent = plannedTask.description;
 
@@ -659,14 +961,14 @@ function renderPlan() {
         ? `depends on ${resolvePlanDependencyLabels(plannedTask.depends_on, plannedTaskLookup).join(", ")}`
         : "no dependencies";
 
-      const refs = document.createElement("div");
-      refs.className = "card-meta";
+      const fileRefs = document.createElement("div");
+      fileRefs.className = "card-meta";
       const referenceFiles = actual
         ? combineReferenceList(actual.discussion_file, actual.files_touched, actual.files_changed)
         : [];
-      refs.textContent = referenceFiles.length ? `files ${referenceFiles.join(", ")}` : "no file refs yet";
+      fileRefs.textContent = referenceFiles.length ? `files ${referenceFiles.join(", ")}` : "no file refs yet";
 
-      taskEl.append(taskHeader, meta, desc, deps, refs);
+      taskEl.append(taskHeader, meta, desc, deps, fileRefs);
       tasks.appendChild(taskEl);
     });
 
@@ -710,7 +1012,7 @@ function combineReferenceList(...groups) {
 
 function clampText(value, limit) {
   if (!value || value.length <= limit) return value;
-  return `${value.slice(0, limit - 1)}…`;
+  return `${value.slice(0, limit - 1)}\u2026`;
 }
 
 function renderAgents() {
@@ -750,19 +1052,22 @@ function renderAgents() {
     dot.className = `dot dot-${agent.status}`;
     header.append(left, dot);
 
+    // Use data attributes for targeted timer updates
     const detail = document.createElement("div");
     detail.className = "card-meta";
+    detail.dataset.agentTimer = agent.name;
     detail.textContent = activeTask
-      ? `task: ${activeTask.title} • ${elapsed(activeTask.started_at || activeTask.created_at)}`
+      ? `task: ${activeTask.title} \u2022 ${elapsed(activeTask.started_at || activeTask.created_at)}`
       : "no active task";
 
     const process = document.createElement("div");
     process.className = "card-meta";
+    process.dataset.agentProcess = agent.name;
     process.textContent = formatAgentProcess(agent);
 
     const stats = document.createElement("div");
     stats.className = "card-meta";
-    stats.textContent = `completed ${agent.tasks_completed || 0} • failed ${agent.tasks_failed || 0} • tokens ${agent.total_tokens_in || 0}/${agent.total_tokens_out || 0}`;
+    stats.textContent = `completed ${agent.tasks_completed || 0} \u2022 failed ${agent.tasks_failed || 0} \u2022 tokens ${agent.total_tokens_in || 0}/${agent.total_tokens_out || 0}`;
 
     const actions = document.createElement("div");
     actions.className = "card-actions";
@@ -805,7 +1110,7 @@ function formatAgentProcess(agent) {
   } else if (invocation.last_event_at) {
     parts.push(`last activity ${elapsed(invocation.last_event_at)}`);
   }
-  return parts.join(" • ");
+  return parts.join(" \u2022 ");
 }
 
 function renderTasks() {
@@ -868,6 +1173,10 @@ function renderTaskCard(task) {
   const title = document.createElement("span");
   title.className = "card-title";
   title.textContent = task.title;
+
+  // Verdict badge in header
+  const verdict = extractVerdict(task.result);
+
   const tags = document.createElement("div");
   tags.className = "tags";
   tags.style.marginTop = "4px";
@@ -877,6 +1186,8 @@ function renderTaskCard(task) {
     tag(`p${task.priority || 3}`),
     task.goal_id ? tag(`goal ${task.goal_id.slice(0, 8)}`) : tag("manual"),
   );
+  if (verdict) tags.appendChild(verdictBadge(verdict));
+
   titleWrap.append(title, tags);
   const timer = document.createElement("span");
   timer.className = "card-meta";
@@ -886,21 +1197,28 @@ function renderTaskCard(task) {
   timer.textContent = task.status === "running" ? elapsed(task.started_at || task.created_at) : formatTime(task.created_at);
   header.append(titleWrap, timer);
 
+  // Collapsible description
   const desc = document.createElement("div");
   desc.className = "card-body";
   const descPre = document.createElement("pre");
   descPre.textContent = task.description;
   desc.appendChild(descPre);
+  card.append(header, desc);
+  makeCollapsible(desc, descPre);
 
+  // Resolve depends_on UUIDs to titles
   const info = document.createElement("div");
   info.className = "card-meta";
+  const depLabels = task.depends_on && task.depends_on.length
+    ? `depends on ${task.depends_on.map(resolveTaskTitle).join(", ")}`
+    : "no dependencies";
   info.textContent = [
-    task.depends_on && task.depends_on.length ? `depends on ${task.depends_on.join(", ")}` : "no dependencies",
+    depLabels,
     task.review_by ? `review: ${task.review_by}` : "no review",
     task.revision_count ? `revision ${task.revision_count}` : "",
-  ].filter(Boolean).join(" • ");
+  ].filter(Boolean).join(" \u2022 ");
 
-  card.append(header, desc, info);
+  card.appendChild(info);
 
   if (task.result) {
     const result = document.createElement("div");
@@ -909,6 +1227,7 @@ function renderTaskCard(task) {
     resultPre.textContent = task.result;
     result.appendChild(resultPre);
     card.appendChild(result);
+    makeCollapsible(result, resultPre);
   }
 
   if (task.error_output) {
@@ -921,6 +1240,7 @@ function renderTaskCard(task) {
     errorPre.textContent = task.error_output;
     error.append(label, errorPre);
     card.appendChild(error);
+    makeCollapsible(error, errorPre);
   }
 
   if (task.review_result) {
@@ -938,8 +1258,7 @@ function renderTaskCard(task) {
   if (task.status === "review") {
     actions.appendChild(actionButton("Accept", () => apiPost(`/api/tasks/${task.id}/approve`)));
     actions.appendChild(actionButton("Reject", () => {
-      const reason = window.prompt("Reason for rejection");
-      if (reason) apiPost(`/api/tasks/${task.id}/reject`, { reason });
+      showRejectModal(task.id);
     }));
   }
 
@@ -998,7 +1317,7 @@ function renderMessages() {
     header.className = "message-header";
     const from = document.createElement("span");
     from.className = "message-from";
-    from.textContent = `${message.from} → ${message.to}`;
+    from.textContent = `${message.from} \u2192 ${message.to}`;
     const headerRight = document.createElement("div");
     headerRight.className = "tags";
     headerRight.append(tag(formatTime(message.timestamp)), tag(message.type));
@@ -1022,7 +1341,7 @@ function renderMessages() {
     if (metaParts.length) {
       const meta = document.createElement("div");
       meta.className = "card-meta";
-      meta.textContent = metaParts.join(" • ");
+      meta.textContent = metaParts.join(" \u2022 ");
       card.appendChild(meta);
     }
 
@@ -1079,37 +1398,44 @@ function toggleComposerFields() {
 async function submitGoal(event) {
   event.preventDefault();
   const parsedRounds = Number.parseInt(refs.goalInputReviewRounds.value, 10);
-  await apiPost("/api/goals", {
+  const response = await apiPost("/api/goals", {
     title: refs.goalInputTitle.value,
     description: refs.goalInputDescription.value,
     workflow_recipe: refs.goalInputRecipe.value,
     max_review_rounds: Number.isFinite(parsedRounds) && parsedRounds > 0 ? parsedRounds : 0,
   });
-  refs.goalInputTitle.value = "";
-  refs.goalInputDescription.value = "";
-  refs.goalInputReviewRounds.value = "";
+  if (response !== false) {
+    showToast("Goal submitted", "success");
+    refs.goalInputTitle.value = "";
+    refs.goalInputDescription.value = "";
+    refs.goalInputReviewRounds.value = "";
+  }
 }
 
 async function startGoal() {
   if (!state.currentGoal) return;
-  await apiPost(`/api/goals/${state.currentGoal.id}/start`);
+  const response = await apiPost(`/api/goals/${state.currentGoal.id}/start`);
+  if (response !== false) showToast("Goal started", "success");
 }
 
 async function stopGoal() {
   if (!state.currentGoal) return;
   if (!window.confirm(`Stop goal "${state.currentGoal.title}"?`)) return;
-  await apiPost(`/api/goals/${state.currentGoal.id}/stop`);
+  const response = await apiPost(`/api/goals/${state.currentGoal.id}/stop`);
+  if (response !== false) showToast("Goal stopped", "info");
 }
 
 async function resumeGoal() {
   if (!state.currentGoal) return;
-  await apiPost(`/api/goals/${state.currentGoal.id}/resume`);
+  const response = await apiPost(`/api/goals/${state.currentGoal.id}/resume`);
+  if (response !== false) showToast("Goal resumed", "success");
 }
 
 async function submitComposer(event) {
   event.preventDefault();
+  let response;
   if (refs.sendMode.value === "task") {
-    await apiPost("/api/tasks", {
+    response = await apiPost("/api/tasks", {
       title: refs.taskTitle.value,
       description: refs.composerInput.value,
       assigned_to: refs.targetAgent.value,
@@ -1117,20 +1443,24 @@ async function submitComposer(event) {
       depends_on: refs.dependsOn.value.split(",").map((value) => value.trim()).filter(Boolean),
     });
   } else {
-    await apiPost("/api/messages", {
+    response = await apiPost("/api/messages", {
       to: refs.targetAgent.value,
       content: refs.composerInput.value,
     });
   }
-  refs.composerInput.value = "";
-  refs.taskTitle.value = "";
-  refs.dependsOn.value = "";
+  if (response !== false) {
+    showToast(refs.sendMode.value === "task" ? "Task created" : "Message sent", "success");
+    refs.composerInput.value = "";
+    refs.taskTitle.value = "";
+    refs.dependsOn.value = "";
+  }
 }
 
 async function deleteGoal() {
   if (!state.currentGoal) return;
   if (!window.confirm(`Delete goal "${state.currentGoal.title}" permanently?`)) return;
-  await apiPost(`/api/goals/${state.currentGoal.id}/delete`);
+  const response = await apiPost(`/api/goals/${state.currentGoal.id}/delete`);
+  if (response !== false) showToast("Goal deleted", "info");
 }
 
 function togglePlanEditor() {
@@ -1143,7 +1473,7 @@ async function submitPlanOverride(event) {
   try {
     parsed = JSON.parse(refs.planInput.value);
   } catch (error) {
-    window.alert(`Invalid JSON: ${error.message}`);
+    showToast(`Invalid JSON: ${error.message}`, "error");
     return;
   }
   await apiPost("/api/plan", {
@@ -1152,7 +1482,7 @@ async function submitPlanOverride(event) {
   });
 }
 
-async function apiPost(path, body = undefined) {
+async function apiPost(path, body) {
   const options = { method: "POST", headers: {} };
   if (body !== undefined) {
     options.headers["Content-Type"] = "application/json";
@@ -1161,15 +1491,17 @@ async function apiPost(path, body = undefined) {
   const response = await fetch(path, options);
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    window.alert(payload.error || `Request failed: ${response.status}`);
+    showToast(payload.error || `Request failed: ${response.status}`, "error");
+    return false;
   }
+  return true;
 }
 
 async function apiUpload(path, formData) {
   const response = await fetch(path, { method: "POST", body: formData });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    window.alert(payload.error || `Request failed: ${response.status}`);
+    showToast(payload.error || `Request failed: ${response.status}`, "error");
     return null;
   }
   return response.json().catch(() => ({}));
@@ -1187,7 +1519,7 @@ async function refreshWorkspace() {
 async function uploadWorkspaceFiles() {
   const files = Array.from(refs.workspaceUploadInput.files || []);
   if (!files.length) {
-    window.alert("Select at least one file to upload.");
+    showToast("Select at least one file to upload.", "error");
     return;
   }
   const formData = new FormData();
@@ -1196,6 +1528,7 @@ async function uploadWorkspaceFiles() {
   if (targetDir) formData.append("target_dir", targetDir);
   const payload = await apiUpload("/api/workspace/files", formData);
   if (!payload) return;
+  showToast(`Uploaded ${files.length} file${files.length > 1 ? "s" : ""}`, "success");
   refs.workspaceUploadInput.value = "";
   await refreshWorkspace();
 }
@@ -1269,6 +1602,12 @@ function renderTreeNode(node) {
   entry.className = `tree-entry ${node.type}`;
   entry.textContent = node.type === "folder" ? `/${node.name}` : node.name;
   entry.title = node.path;
+
+  // Click to open file viewer for files
+  if (node.type === "file") {
+    entry.addEventListener("click", () => openFileViewer(node.path));
+  }
+
   wrapper.appendChild(entry);
 
   if (node.children && node.children.length) {

@@ -38,6 +38,10 @@ type WorkflowConfig struct {
 	DefaultRecipe       string `yaml:"default_recipe" json:"default_recipe"`
 }
 
+// BrainConfig is legacy naming kept for config file compatibility (brain: section in YAML).
+// In the current architecture this configures the LLM provider used for non-deterministic
+// planning styles (upfront/rolling). For the default deterministic workflow, only Provider
+// and PlanningStyle are meaningful.
 type BrainConfig struct {
 	Provider           string   `yaml:"provider" json:"provider"`
 	Command            string   `yaml:"command" json:"command"`

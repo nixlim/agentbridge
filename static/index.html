@@ -11,6 +11,8 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+  <div id="toast-container" class="toast-container"></div>
+
   <div class="shell">
 
     <div class="topbar">
@@ -28,12 +30,16 @@
         <label>Workspace</label>
         <span id="workspace-path">unknown</span>
       </div>
+      <button id="theme-toggle" type="button" class="theme-toggle">Light</button>
     </div>
 
     <div id="goalbar" class="goalbar empty">
-      <div class="goalbar-info">
+      <div class="goalbar-info" style="position:relative">
         <span id="goal-title" class="goalbar-title">No active goal</span>
         <span id="goal-status" class="goalbar-status"></span>
+        <div id="workflow-stepper"></div>
+        <button id="goal-history-toggle" type="button" class="goal-history-toggle hidden">History</button>
+        <div id="goal-history-dropdown" class="goal-history-dropdown hidden"></div>
       </div>
       <div class="goalbar-progress">
         <div class="progress-track">
@@ -55,7 +61,7 @@
       <button class="tab" data-tab="tasks">Tasks <span id="tab-tasks-count" class="tab-count"></span></button>
       <button class="tab" data-tab="messages">Messages</button>
       <button class="tab" data-tab="workspace">Workspace</button>
-      <button class="tab" data-tab="controls">Controls</button>
+      <button class="tab" data-tab="controls">Launch</button>
     </nav>
 
     <div class="tab-panels">
@@ -163,13 +169,14 @@
         </div>
       </div>
 
-      <!-- Controls -->
+      <!-- Launch (formerly Controls) -->
       <div class="tab-panel" data-tab="controls">
         <div class="section">
           <div class="section-header">
             <span class="section-title">Submit Goal</span>
           </div>
           <form id="goal-form" class="form-grid" style="grid-template-columns:1fr">
+            <p class="form-hint">Upload source documents in the Workspace tab before submitting a goal.</p>
             <input id="goal-input-title" type="text" placeholder="Goal title">
             <textarea id="goal-input-description" rows="3" placeholder="High-level outcome, constraints, or guidance"></textarea>
             <select id="goal-input-recipe">

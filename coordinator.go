@@ -16,6 +16,22 @@ import (
 	"github.com/google/uuid"
 )
 
+// Naming note: The coordinator was originally built around an LLM-driven "brain"
+// that made planning decisions. The architecture has since shifted to a deterministic
+// workflow model where the coordinator follows fixed recipes (spec→review loops, etc.).
+//
+// Legacy "brain" names that map to current concepts:
+//   brainState        → workflow/plan state (BrainState holds the current plan and conversation history)
+//   brainAdapter      → LLM adapter used only for non-deterministic planning styles (upfront/rolling)
+//   brainSystemPrompt → system prompt for the LLM adapter (non-deterministic paths only)
+//   brainQueue        → follow-up action queue for the workflow tick loop
+//   brainFollowUp     → a queued follow-up action (trigger + context)
+//   brainCancel       → cancel func for an in-flight LLM brain call (non-deterministic paths)
+//   brainLoop         → the main workflow tick loop that drives plan execution
+//
+// These names are preserved to avoid a risky rename across 3000+ lines.
+// TODO: Consider a phased rename once the non-deterministic planning paths are removed.
+
 const (
 	defaultSpecOutputDir = "specs"
 )
@@ -2036,6 +2052,10 @@ func (c *Coordinator) recentMessagesLocked(limit int) []*Message {
 	return append([]*Message(nil), c.messages[len(c.messages)-limit:]...)
 }
 
+// snapshotLocked returns the current state for WebSocket broadcast and initial connect.
+// Note: workspace file listing is intentionally excluded here. ListFiles is an IO operation
+// (directory walk) that must not run under the coordinator mutex. Clients that need the
+// file list should call GET /api/workspace/files separately.
 func (c *Coordinator) snapshotLocked() map[string]interface{} {
 	goals := make([]*Goal, 0, len(c.goalOrder))
 	for _, id := range c.goalOrder {
