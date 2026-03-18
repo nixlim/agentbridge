@@ -55,6 +55,17 @@
       </div>
     </div>
 
+    <div id="gate-panel" class="callout hidden" style="margin:0 20px 0 20px">
+      <strong id="gate-title">Human Decision Required</strong>
+      <p id="gate-message"></p>
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;margin-top:8px">
+        <textarea id="gate-feedback" rows="2" placeholder="Optional feedback or corrections"></textarea>
+        <div></div>
+        <button id="gate-approve" type="button" class="btn-primary btn-sm">Approve</button>
+        <button id="gate-reject" type="button" class="btn-danger btn-sm">Reject</button>
+      </div>
+    </div>
+
     <nav class="tabbar">
       <button class="tab active" data-tab="overview">Overview</button>
       <button class="tab" data-tab="plan">Plan</button>
@@ -122,6 +133,18 @@
             </form>
           </div>
           <div id="plan-view"></div>
+        </div>
+        <div class="section" id="spec-diff-section" style="margin-top:16px">
+          <div class="section-header">
+            <span class="section-title">Spec Version Diff</span>
+            <div class="section-actions">
+              <select id="diff-version-a" class="topbar-select"></select>
+              <span style="color:var(--text-muted);font-size:11px">vs</span>
+              <select id="diff-version-b" class="topbar-select"></select>
+              <button id="load-diff" type="button" class="btn-sm">Load Diff</button>
+            </div>
+          </div>
+          <div id="diff-view" class="diff-view"></div>
         </div>
       </div>
 

@@ -106,7 +106,7 @@ h1, h2, h3, p {
 .shell {
   height: 100vh;
   display: grid;
-  grid-template-rows: auto auto auto 1fr;
+  grid-template-rows: auto auto auto auto 1fr;
   overflow: hidden;
 }
 
@@ -1303,6 +1303,26 @@ button[type="submit"]:hover,
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.14);
 }
+
+/* ---- Diff View ---- */
+
+.diff-view {
+  max-height: 60vh;
+  overflow-y: auto;
+  font-size: 12px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+}
+.diff-line { padding: 1px 8px; white-space: pre-wrap; font-family: inherit; }
+.diff-add { background: var(--success-dim); color: var(--success); }
+.diff-remove { background: var(--danger-dim); color: var(--danger); }
+.diff-same { color: var(--text-muted); }
+
+/* ---- Gate Panel ---- */
+
+.card.status-gated { border-left: 3px solid var(--warning); }
 
 /* ---- Responsive ---- */
 

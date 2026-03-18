@@ -73,6 +73,16 @@ const refs = {
   workflowStepper: document.getElementById("workflow-stepper"),
   goalHistoryToggle: document.getElementById("goal-history-toggle"),
   goalHistoryDropdown: document.getElementById("goal-history-dropdown"),
+  diffVersionA: document.getElementById("diff-version-a"),
+  diffVersionB: document.getElementById("diff-version-b"),
+  loadDiff: document.getElementById("load-diff"),
+  diffView: document.getElementById("diff-view"),
+  gatePanel: document.getElementById("gate-panel"),
+  gateTitle: document.getElementById("gate-title"),
+  gateMessage: document.getElementById("gate-message"),
+  gateFeedback: document.getElementById("gate-feedback"),
+  gateApprove: document.getElementById("gate-approve"),
+  gateReject: document.getElementById("gate-reject"),
 };
 
 const messageTypes = [
@@ -310,8 +320,174 @@ function goalStatusTagClass(goal) {
   if (status === "active" || status === "planning") return "tag-accent";
   if (status === "completed" || status === "finished") return "tag-success";
   if (status === "failed" || status === "blocked") return "tag-danger";
-  if (status === "stopped") return "tag-warning";
+  if (status === "stopped" || status === "gated") return "tag-warning";
   return "";
+}
+
+/* ---- Spec Diff ---- */
+
+function renderDiffVersionOptions() {
+  const pattern = /^specs\/.*-spec-v(\d+)\.md$/;
+  const versions = [];
+  (state.workspaceFiles || []).forEach((filePath) => {
+    const match = filePath.match(pattern);
+    if (match) versions.push(Number.parseInt(match[1], 10));
+  });
+  versions.sort((a, b) => a - b);
+  const unique = [...new Set(versions)];
+
+  [refs.diffVersionA, refs.diffVersionB].forEach((select) => {
+    select.textContent = "";
+    unique.forEach((v) => {
+      const opt = document.createElement("option");
+      opt.value = String(v);
+      opt.textContent = `v${v}`;
+      select.appendChild(opt);
+    });
+  });
+
+  if (unique.length >= 2) {
+    refs.diffVersionA.value = String(unique[unique.length - 2]);
+    refs.diffVersionB.value = String(unique[unique.length - 1]);
+  }
+}
+
+function computeLineDiff(textA, textB) {
+  const linesA = textA.split("\n");
+  const linesB = textB.split("\n");
+  const result = [];
+
+  // LCS-based diff
+  const m = linesA.length;
+  const n = linesB.length;
+
+  // Build LCS table
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (linesA[i - 1] === linesB[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+
+  // Backtrack to produce diff
+  let i = m;
+  let j = n;
+  const stack = [];
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && linesA[i - 1] === linesB[j - 1]) {
+      stack.push({ type: "same", text: linesA[i - 1] });
+      i--;
+      j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      stack.push({ type: "add", text: linesB[j - 1] });
+      j--;
+    } else {
+      stack.push({ type: "remove", text: linesA[i - 1] });
+      i--;
+    }
+  }
+  stack.reverse();
+  return stack;
+}
+
+async function loadSpecDiff() {
+  const vA = refs.diffVersionA.value;
+  const vB = refs.diffVersionB.value;
+  if (!vA || !vB) {
+    showToast("Select two versions to compare.", "error");
+    return;
+  }
+
+  // Find matching files for each version
+  const pattern = /^specs\/.*-spec-v(\d+)\.md$/;
+  const filesA = (state.workspaceFiles || []).filter((f) => {
+    const m = f.match(pattern);
+    return m && m[1] === vA;
+  });
+  const filesB = (state.workspaceFiles || []).filter((f) => {
+    const m = f.match(pattern);
+    return m && m[1] === vB;
+  });
+
+  if (!filesA.length || !filesB.length) {
+    showToast("Could not find spec files for selected versions.", "error");
+    return;
+  }
+
+  try {
+    const [respA, respB] = await Promise.all([
+      fetch(`/api/workspace/files/${encodeURIComponent(filesA[0])}`),
+      fetch(`/api/workspace/files/${encodeURIComponent(filesB[0])}`),
+    ]);
+    if (!respA.ok || !respB.ok) {
+      showToast("Failed to fetch spec files.", "error");
+      return;
+    }
+    const [textA, textB] = await Promise.all([respA.text(), respB.text()]);
+    const diff = computeLineDiff(textA, textB);
+    renderDiff(diff);
+  } catch (err) {
+    showToast(`Error loading diff: ${err.message}`, "error");
+  }
+}
+
+function renderDiff(diffLines) {
+  refs.diffView.textContent = "";
+  if (!diffLines.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No differences found.";
+    refs.diffView.appendChild(empty);
+    return;
+  }
+
+  diffLines.forEach((line) => {
+    const el = document.createElement("div");
+    el.className = "diff-line";
+    if (line.type === "add") {
+      el.classList.add("diff-add");
+      el.textContent = `+ ${line.text}`;
+    } else if (line.type === "remove") {
+      el.classList.add("diff-remove");
+      el.textContent = `- ${line.text}`;
+    } else {
+      el.classList.add("diff-same");
+      el.textContent = `  ${line.text}`;
+    }
+    refs.diffView.appendChild(el);
+  });
+}
+
+/* ---- Gate Resolution ---- */
+
+async function approveGate() {
+  const goal = state.currentGoal;
+  if (!goal) return;
+  const response = await apiPost(`/api/goals/${goal.id}/gate`, {
+    approved: true,
+    feedback: refs.gateFeedback.value,
+  });
+  if (response !== false) {
+    showToast("Gate approved", "success");
+    refs.gateFeedback.value = "";
+  }
+}
+
+async function rejectGate() {
+  const goal = state.currentGoal;
+  if (!goal) return;
+  const response = await apiPost(`/api/goals/${goal.id}/gate`, {
+    approved: false,
+    feedback: refs.gateFeedback.value,
+  });
+  if (response !== false) {
+    showToast("Gate rejected", "info");
+    refs.gateFeedback.value = "";
+  }
 }
 
 /* ---- Resolve Dependency UUIDs ---- */
@@ -404,6 +580,10 @@ function init() {
       refs.goalHistoryDropdown.classList.add("hidden");
     }
   });
+
+  refs.loadDiff.addEventListener("click", loadSpecDiff);
+  refs.gateApprove.addEventListener("click", approveGate);
+  refs.gateReject.addEventListener("click", rejectGate);
 
   toggleComposerFields();
   renderHumanInputRequest();
@@ -502,6 +682,7 @@ function renderAll() {
   renderTasks();
   renderMessages();
   renderWorkspace();
+  renderDiffVersionOptions();
   refreshWorkspace();
 
   // Default tab: switch to Launch if no active goal
@@ -604,6 +785,7 @@ function renderGoalBar() {
     refs.deleteGoal.classList.add("hidden");
     refs.goalHistoryToggle.classList.add("hidden");
     refs.workflowStepper.textContent = "";
+    refs.gatePanel.classList.add("hidden");
     return;
   }
 
@@ -653,6 +835,16 @@ function renderGoalBar() {
   // Show goal history toggle if there are multiple goals
   refs.goalHistoryToggle.classList.toggle("hidden", state.goals.length < 2);
 
+  // Gate panel
+  if (goal.active_gate && goal.status === "gated") {
+    refs.gatePanel.classList.remove("hidden");
+    const gateType = goal.active_gate.type || "Human Decision Required";
+    refs.gateTitle.textContent = gateType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+    refs.gateMessage.textContent = goal.active_gate.message || "";
+  } else {
+    refs.gatePanel.classList.add("hidden");
+  }
+
   renderWorkflowStepper();
 }
 
@@ -667,7 +859,7 @@ function canStopGoal(goal) {
 
 function canResumeGoal(goal) {
   if (!goal || !state.plan || state.plan.goal_id !== goal.id) return false;
-  if (!["blocked", "failed"].includes(goal.status)) return false;
+  if (!["blocked", "failed", "gated"].includes(goal.status)) return false;
   return !isPlanCompleteForGoal(goal.id);
 }
 
@@ -677,14 +869,14 @@ function canDeleteGoal(goal) {
 
 function effectiveGoalStatus(goal) {
   if (!goal) return "";
-  if (isPlanCompleteForGoal(goal.id) && ["blocked", "failed", "stopped", "completed"].includes(goal.status)) {
+  if (isPlanCompleteForGoal(goal.id) && ["blocked", "failed", "stopped", "completed", "gated"].includes(goal.status)) {
     return "finished";
   }
   return goal.status;
 }
 
 function isTerminalGoalStatus(status) {
-  return ["blocked", "failed", "stopped", "completed", "finished"].includes(status);
+  return ["blocked", "failed", "stopped", "completed", "finished", "gated"].includes(status);
 }
 
 function isPlanCompleteForGoal(goalID) {
@@ -1381,7 +1573,7 @@ function statusTag(status) {
   if (status === "running" || status === "busy") el.classList.add("tag-accent");
   else if (status === "completed" || status === "idle") el.classList.add("tag-success");
   else if (status === "failed" || status === "error" || status === "blocked") el.classList.add("tag-danger");
-  else if (status === "review") el.classList.add("tag-warning");
+  else if (status === "review" || status === "gated") el.classList.add("tag-warning");
   else if (status === "paused") el.classList.add("tag-purple");
   return el;
 }
@@ -1513,6 +1705,7 @@ async function refreshWorkspace() {
     if (!response.ok) return;
     state.workspaceFiles = await response.json();
     renderWorkspace();
+    renderDiffVersionOptions();
   } catch (_) {}
 }
 
@@ -1555,14 +1748,14 @@ function upsertGoal(goal) {
 function chooseCurrentGoal() {
   if (state.plan && state.plan.goal_id) {
     const goalFromPlan = state.goals.find((entry) => entry.id === state.plan.goal_id);
-    if (goalFromPlan && ["planning", "active", "blocked", "stopped", "failed"].includes(goalFromPlan.status) && !isPlanCompleteForGoal(goalFromPlan.id)) {
+    if (goalFromPlan && ["planning", "active", "blocked", "stopped", "failed", "gated"].includes(goalFromPlan.status) && !isPlanCompleteForGoal(goalFromPlan.id)) {
       return goalFromPlan;
     }
   }
   return state.goals
     .slice()
     .reverse()
-    .find((entry) => ["planning", "active", "blocked", "stopped", "failed"].includes(entry.status)) || null;
+    .find((entry) => ["planning", "active", "blocked", "stopped", "failed", "gated"].includes(entry.status)) || null;
 }
 
 function currentTaskForAgent(agentName) {

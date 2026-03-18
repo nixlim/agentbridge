@@ -67,6 +67,7 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/api/goals/{id}/resume", s.handleGoalResume).Methods(http.MethodPost)
 	s.router.HandleFunc("/api/goals/{id}/delete", s.handleGoalDelete).Methods(http.MethodPost)
 	s.router.HandleFunc("/api/goals/{id}/kill", s.handleGoalKill).Methods(http.MethodPost)
+	s.router.HandleFunc("/api/goals/{id}/gate", s.handleGoalGate).Methods(http.MethodPost)
 	s.router.HandleFunc("/api/plan", s.handlePlan).Methods(http.MethodGet, http.MethodPost)
 	s.router.HandleFunc("/api/workspace/files", s.handleWorkspaceFiles).Methods(http.MethodGet, http.MethodPost)
 	s.router.HandleFunc("/api/workspace/files/{path:.*}", s.handleWorkspaceFile).Methods(http.MethodGet)
@@ -243,6 +244,17 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if err := json.Unmarshal(payload["data"], &req); err != nil {
 					sendWSError(conn, action, err)
 				} else if err := s.coordinator.StopGoal(req.GoalID); err != nil {
+					sendWSError(conn, action, err)
+				}
+			case "resolve_gate":
+				var req struct {
+					GoalID   string `json:"goal_id"`
+					Approved bool   `json:"approved"`
+					Feedback string `json:"feedback"`
+				}
+				if err := json.Unmarshal(payload["data"], &req); err != nil {
+					sendWSError(conn, action, err)
+				} else if err := s.coordinator.ResolveGate(req.GoalID, req.Approved, req.Feedback); err != nil {
 					sendWSError(conn, action, err)
 				}
 			}
@@ -489,6 +501,23 @@ func (s *Server) handleGoalDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleGoalGate(w http.ResponseWriter, r *http.Request) {
+	goalID := mux.Vars(r)["id"]
+	var req struct {
+		Approved bool   `json:"approved"`
+		Feedback string `json:"feedback"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.coordinator.ResolveGate(goalID, req.Approved, req.Feedback); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
 }
 
 func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {

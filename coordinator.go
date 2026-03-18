@@ -184,7 +184,7 @@ func (c *Coordinator) RecoverFromLog() error {
 		if goal == nil {
 			continue
 		}
-		if goal.Status == GoalPlanning || goal.Status == GoalActive {
+		if goal.Status == GoalPlanning || goal.Status == GoalActive || goal.Status == GoalGated {
 			c.currentGoalID = goal.ID
 			break
 		}
@@ -359,7 +359,7 @@ func (c *Coordinator) SubmitGoal(req CreateGoalRequest) (*Goal, error) {
 		c.mu.Unlock()
 		return nil, errors.New("coordinator is shutting down")
 	}
-	if active := c.currentGoalLocked(); active != nil && (active.Status == GoalPlanning || active.Status == GoalActive) {
+	if active := c.currentGoalLocked(); active != nil && (active.Status == GoalPlanning || active.Status == GoalActive || active.Status == GoalGated) {
 		c.mu.Unlock()
 		return nil, errors.New("an active goal already exists")
 	}
@@ -524,7 +524,7 @@ func (c *Coordinator) resumeGoalLocked(goalID string, record string) error {
 		return errors.New("goal not found")
 	}
 	switch goal.Status {
-	case GoalStopped, GoalBlocked:
+	case GoalStopped, GoalBlocked, GoalGated:
 	case GoalFailed:
 		if strings.TrimSpace(goal.Summary) != "killed by human" && !c.goalHasIncompletePlanLocked(goalID) {
 			return errors.New("goal cannot be resumed from failed state")
@@ -539,6 +539,7 @@ func (c *Coordinator) resumeGoalLocked(goalID string, record string) error {
 	goal.Status = GoalActive
 	goal.Summary = ""
 	goal.CompletedAt = nil
+	goal.ActiveGate = nil
 	c.currentGoalID = goalID
 	c.brainState.PendingHumanInput = nil
 	c.recordGoalLocked(goal, record)
@@ -2437,7 +2438,7 @@ func (c *Coordinator) advanceGoalWorkflowLocked() error {
 	if goal == nil || c.planExecutor == nil || c.brainState.CurrentPlan == nil {
 		return nil
 	}
-	if goal.Status == GoalBlocked || goal.Status == GoalFailed || goal.Status == GoalCompleted {
+	if goal.Status == GoalBlocked || goal.Status == GoalFailed || goal.Status == GoalCompleted || goal.Status == GoalGated {
 		return nil
 	}
 	if reason, tripped := c.checkCircuitBreakersLocked(goal); tripped {
@@ -2503,7 +2504,7 @@ func (c *Coordinator) workflowStateLocked() WorkflowState {
 	state.MaxReviewRounds = c.goalReviewRoundsLocked(goal)
 	state.SpecVersion = state.CompletedReviewRounds
 	state.StageTaskCompleted, state.StageTaskTotal = c.phaseTaskProgressLocked(phase)
-	if goal.Summary != "" && (goal.Status == GoalBlocked || goal.Status == GoalFailed) {
+	if goal.Summary != "" && (goal.Status == GoalBlocked || goal.Status == GoalFailed || goal.Status == GoalGated) {
 		state.LastError = goal.Summary
 	}
 
@@ -2593,6 +2594,17 @@ func (c *Coordinator) handleCompletedPhaseLocked(goal *Goal, phaseIndex int) (bo
 		return false, nil
 	}
 	phase := c.brainState.CurrentPlan.Phases[phaseIndex]
+
+	// Post-discovery gate: pause after the discovery phase so a human can review
+	// the extracted requirements before spec drafting begins.
+	if c.config.Workflow.EnableHumanGates && c.config.Workflow.EnableDiscovery {
+		stage := c.workflowStageForPhase(phase)
+		if stage == "executing" && strings.Contains(strings.ToLower(phase.Title), "discover") {
+			c.gateGoalLocked(goal, "discovery_review", "Review the extracted requirements before spec drafting begins.", 0)
+			return true, nil
+		}
+	}
+
 	switch c.goalWorkflowRecipeLocked(goal) {
 	case workflowRecipeSpecCrossCritiqueLoop:
 		return c.handleCompletedCrossCritiquePhaseLocked(goal, phase)
@@ -2615,12 +2627,23 @@ func (c *Coordinator) handleCompletedParallelReviewPhaseLocked(goal *Goal, phase
 	// Parse, merge, and persist structured findings from this review round.
 	c.mergeReviewFindingsLocked(goal, reviewTasks, round)
 
+	// Check for stale findings that persist unchanged across rounds.
+	if reason, stale := c.checkFindingStalenessLocked(goal, round); stale {
+		c.blockGoalLocked(goal, reason, reason)
+		return true, nil
+	}
+
 	if allPassed {
 		c.completeCurrentGoalLocked(fmt.Sprintf("Specification %q passed adversarial review after %d round(s).", goal.Title, round))
 		return true, nil
 	}
 	if round >= c.goalReviewRoundsLocked(goal) {
-		c.blockGoalLocked(goal, fmt.Sprintf("specification review did not pass after %d rounds: %s", round, strings.TrimSpace(strings.Join(failedSummaries, "\n\n---\n\n"))), "goal blocked")
+		msg := fmt.Sprintf("specification review did not pass after %d rounds: %s", round, strings.TrimSpace(strings.Join(failedSummaries, "\n\n---\n\n")))
+		if c.config.Workflow.EnableHumanGates {
+			c.gateGoalLocked(goal, "escalation", msg, round)
+		} else {
+			c.blockGoalLocked(goal, msg, "goal blocked")
+		}
 		return true, nil
 	}
 	if reason, tripped := c.checkCircuitBreakersLocked(goal); tripped {
@@ -2658,12 +2681,23 @@ func (c *Coordinator) handleCompletedCrossCritiquePhaseLocked(goal *Goal, phase 
 	// Parse, merge, and persist structured findings from this review round.
 	c.mergeReviewFindingsLocked(goal, reviewTasks, round)
 
+	// Check for stale findings that persist unchanged across rounds.
+	if reason, stale := c.checkFindingStalenessLocked(goal, round); stale {
+		c.blockGoalLocked(goal, reason, reason)
+		return true, nil
+	}
+
 	if allPassed {
 		c.completeCurrentGoalLocked(fmt.Sprintf("Specification %q passed adversarial review after %d round(s).", goal.Title, round))
 		return true, nil
 	}
 	if round >= c.goalReviewRoundsLocked(goal) {
-		c.blockGoalLocked(goal, fmt.Sprintf("specification review did not pass after %d rounds: %s", round, strings.TrimSpace(strings.Join(failedSummaries, "\n\n---\n\n"))), "goal blocked")
+		msg := fmt.Sprintf("specification review did not pass after %d rounds: %s", round, strings.TrimSpace(strings.Join(failedSummaries, "\n\n---\n\n")))
+		if c.config.Workflow.EnableHumanGates {
+			c.gateGoalLocked(goal, "escalation", msg, round)
+		} else {
+			c.blockGoalLocked(goal, msg, "goal blocked")
+		}
 		return true, nil
 	}
 	if reason, tripped := c.checkCircuitBreakersLocked(goal); tripped {
@@ -2828,6 +2862,8 @@ func (c *Coordinator) tasksForReviewRoundLocked(round int, stage string) []*Task
 func (c *Coordinator) workflowStageForPhase(phase Phase) string {
 	title := strings.ToLower(phase.Title)
 	switch {
+	case strings.Contains(title, "discover requirements"):
+		return "discovering_requirements"
 	case strings.Contains(title, "prepare spec"):
 		return "preparing_spec"
 	case strings.Contains(title, "cross critique"):
@@ -3007,6 +3043,30 @@ func (c *Coordinator) buildSpecWorkflowPlanLocked(goal *Goal, primary string, re
 	specPath := c.specOutputPath(goal)
 	slug := c.goalSlug(goal)
 	v0Path := specVersionPath(slug, 0)
+
+	var phases []Phase
+	phaseNum := 1
+	prepDependsOn := []string(nil)
+
+	if c.config.Workflow.EnableDiscovery {
+		reqPath := filepath.ToSlash(filepath.Join("discussions", slug, "requirements.md"))
+		phases = append(phases, Phase{
+			Number:      phaseNum,
+			Title:       "Discover Requirements",
+			Description: "Extract structured requirements from source documents before spec drafting.",
+			Tasks: []PlannedTask{{
+				TempID:       "discover-requirements",
+				Title:        fmt.Sprintf("Discover Requirements for %s", baseTitle),
+				Description:  c.buildDiscoveryTaskDescription(goal),
+				AssignTo:     primary,
+				Priority:     1,
+				FilesTouched: []string{reqPath},
+			}},
+		})
+		prepDependsOn = []string{"discover-requirements"}
+		phaseNum++
+	}
+
 	reviewTasks := make([]PlannedTask, 0, len(reviewers))
 	for i, reviewer := range reviewers {
 		reviewTasks = append(reviewTasks, PlannedTask{
@@ -3018,29 +3078,33 @@ func (c *Coordinator) buildSpecWorkflowPlanLocked(goal *Goal, primary string, re
 			Priority:    1,
 		})
 	}
+
+	phases = append(phases, Phase{
+		Number:      phaseNum,
+		Title:       "Prepare Spec",
+		Description: "Create the implementation-ready specification from the provided technical documents.",
+		Tasks: []PlannedTask{{
+			TempID:       "prepare-spec-r1",
+			Title:        fmt.Sprintf("Prepare %s Specification", baseTitle),
+			Description:  c.buildSpecPreparationTaskDescription(goal, specPath),
+			AssignTo:     primary,
+			DependsOn:    prepDependsOn,
+			Priority:     1,
+			FilesTouched: []string{v0Path},
+		}},
+	})
+	phaseNum++
+
+	phases = append(phases, Phase{
+		Number:      phaseNum,
+		Title:       "Adversarial Review Round 1",
+		Description: "Run two parallel adversarial reviews over the specification.",
+		Tasks:       reviewTasks,
+	})
+
 	return &Plan{
 		GoalID: goal.ID,
-		Phases: []Phase{
-			{
-				Number:      1,
-				Title:       "Prepare Spec",
-				Description: "Create the implementation-ready specification from the provided technical documents.",
-				Tasks: []PlannedTask{{
-					TempID:       "prepare-spec-r1",
-					Title:        fmt.Sprintf("Prepare %s Specification", baseTitle),
-					Description:  c.buildSpecPreparationTaskDescription(goal, specPath),
-					AssignTo:     primary,
-					Priority:     1,
-					FilesTouched: []string{v0Path},
-				}},
-			},
-			{
-				Number:      2,
-				Title:       "Adversarial Review Round 1",
-				Description: "Run two parallel adversarial reviews over the specification.",
-				Tasks:       reviewTasks,
-			},
-		},
+		Phases: phases,
 	}
 }
 
@@ -3049,30 +3113,56 @@ func (c *Coordinator) buildSpecCrossCritiqueWorkflowPlanLocked(goal *Goal, prima
 	specPath := c.specOutputPath(goal)
 	slug := c.goalSlug(goal)
 	v0Path := specVersionPath(slug, 0)
+
+	var phases []Phase
+	phaseNum := 1
+	prepDependsOn := []string(nil)
+
+	if c.config.Workflow.EnableDiscovery {
+		reqPath := filepath.ToSlash(filepath.Join("discussions", slug, "requirements.md"))
+		phases = append(phases, Phase{
+			Number:      phaseNum,
+			Title:       "Discover Requirements",
+			Description: "Extract structured requirements from source documents before spec drafting.",
+			Tasks: []PlannedTask{{
+				TempID:       "discover-requirements",
+				Title:        fmt.Sprintf("Discover Requirements for %s", baseTitle),
+				Description:  c.buildDiscoveryTaskDescription(goal),
+				AssignTo:     primary,
+				Priority:     1,
+				FilesTouched: []string{reqPath},
+			}},
+		})
+		prepDependsOn = []string{"discover-requirements"}
+		phaseNum++
+	}
+
+	phases = append(phases, Phase{
+		Number:      phaseNum,
+		Title:       "Prepare Spec",
+		Description: "Create the implementation-ready specification from the provided technical documents.",
+		Tasks: []PlannedTask{{
+			TempID:       "prepare-spec-r1",
+			Title:        fmt.Sprintf("Prepare %s Specification", baseTitle),
+			Description:  c.buildSpecPreparationTaskDescription(goal, specPath),
+			AssignTo:     primary,
+			DependsOn:    prepDependsOn,
+			Priority:     1,
+			FilesTouched: []string{v0Path},
+		}},
+	})
+	phaseNum++
+
 	reviewPhases, critiquePhase, consolidatePhase := c.buildCrossCritiqueRoundPhasesLocked(goal, primary, reviewers, specPath, baseTitle, 1, []string{"prepare-spec-r1"})
-	reviewPhases.Number = 2
-	critiquePhase.Number = 3
-	consolidatePhase.Number = 4
+	reviewPhases.Number = phaseNum
+	critiquePhase.Number = phaseNum + 1
+	consolidatePhase.Number = phaseNum + 2
+
+	phases = append(phases, reviewPhases, critiquePhase, consolidatePhase)
+
 	return &Plan{
 		GoalID: goal.ID,
-		Phases: []Phase{
-			{
-				Number:      1,
-				Title:       "Prepare Spec",
-				Description: "Create the implementation-ready specification from the provided technical documents.",
-				Tasks: []PlannedTask{{
-					TempID:       "prepare-spec-r1",
-					Title:        fmt.Sprintf("Prepare %s Specification", baseTitle),
-					Description:  c.buildSpecPreparationTaskDescription(goal, specPath),
-					AssignTo:     primary,
-					Priority:     1,
-					FilesTouched: []string{v0Path},
-				}},
-			},
-			reviewPhases,
-			critiquePhase,
-			consolidatePhase,
-		},
+		Phases: phases,
 	}
 }
 
@@ -3196,6 +3286,21 @@ func (c *Coordinator) goalReviewRoundsLocked(goal *Goal) int {
 	return c.resolveGoalReviewRounds(0)
 }
 
+func (c *Coordinator) buildDiscoveryTaskDescription(goal *Goal) string {
+	slug := c.goalSlug(goal)
+	reqPath := filepath.ToSlash(filepath.Join("discussions", slug, "requirements.md"))
+	return strings.TrimSpace(strings.Join([]string{
+		"Analyze the source documents in the workspace and extract structured requirements.",
+		"Produce a requirements summary covering: actors, scope, constraints, priorities, assumptions, and open questions.",
+		fmt.Sprintf("Write the requirements to: %s", reqPath),
+		"Format as markdown with clear section headings for each category.",
+		"Flag any ambiguities or conflicts between source documents.",
+		fmt.Sprintf("Goal title: %s", goal.Title),
+		"Goal details:",
+		goal.Description,
+	}, "\n\n"))
+}
+
 func (c *Coordinator) buildDraftTaskDescription(goal *Goal) string {
 	return strings.TrimSpace(strings.Join([]string{
 		"Produce the initial deliverable for this goal.",
@@ -3250,18 +3355,25 @@ func specVersionPath(goalSlug string, version int) string {
 func (c *Coordinator) buildSpecPreparationTaskDescription(goal *Goal, specPath string) string {
 	slug := c.goalSlug(goal)
 	v0Path := specVersionPath(slug, 0)
-	return strings.TrimSpace(strings.Join([]string{
+	lines := []string{
 		"Prepare an implementation-ready specification from the supplied technical materials.",
 		fmt.Sprintf("Use the plan-spec skill located at: %s", specPrepSkillPath()),
 		fmt.Sprintf("Write the specification to this workspace path: %s", v0Path),
 		"Create the directory if needed. The file must be markdown.",
+	}
+	if c.config.Workflow.EnableDiscovery {
+		reqPath := filepath.ToSlash(filepath.Join("discussions", slug, "requirements.md"))
+		lines = append(lines, fmt.Sprintf("Use the requirements extracted in the discovery phase as your primary input. The requirements file is at: %s", reqPath))
+	}
+	lines = append(lines,
 		"Use the technical documents and constraints in the goal details as source inputs.",
 		"Your output must leave the spec ready for adversarial review by another agent.",
 		"At the end, summarize the output path, major assumptions addressed, and any remaining open questions.",
 		fmt.Sprintf("Goal title: %s", goal.Title),
 		"Goal details:",
 		goal.Description,
-	}, "\n\n"))
+	)
+	return strings.TrimSpace(strings.Join(lines, "\n\n"))
 }
 
 func (c *Coordinator) buildSpecReviewTaskDescription(goal *Goal, specPath string, round int, reviewerIndex int, reviewerCount int) string {
@@ -3419,6 +3531,59 @@ func (c *Coordinator) checkCircuitBreakersLocked(goal *Goal) (string, bool) {
 	return "", false
 }
 
+// checkFindingStalenessLocked detects CRITICAL or MAJOR findings that persist
+// unchanged (still "raised") across consecutive review rounds. This is a circuit
+// breaker: if 2 or more such findings are stale, the goal should be blocked.
+// Only meaningful when currentRound >= 3 (need at least 2 prior rounds).
+func (c *Coordinator) checkFindingStalenessLocked(goal *Goal, currentRound int) (string, bool) {
+	if goal == nil || currentRound < 3 {
+		return "", false
+	}
+	slug := c.goalSlug(goal)
+
+	currentLedger, err := ReadFindingsLedger(c.workspace, slug, currentRound)
+	if err != nil || currentLedger == nil {
+		return "", false
+	}
+	priorLedger, err := ReadFindingsLedger(c.workspace, slug, currentRound-1)
+	if err != nil || priorLedger == nil {
+		return "", false
+	}
+
+	// Index prior findings by ID for lookup.
+	priorByID := make(map[string]*Finding, len(priorLedger.Findings))
+	for _, f := range priorLedger.Findings {
+		priorByID[f.ID] = f
+	}
+
+	const stalenessThreshold = 2
+	staleCount := 0
+	staleIDs := make([]string, 0)
+	for _, f := range currentLedger.Findings {
+		if f.Severity != SeverityCritical && f.Severity != SeverityMajor {
+			continue
+		}
+		if f.Status != FindingRaised {
+			continue
+		}
+		prior, ok := priorByID[f.ID]
+		if !ok {
+			continue
+		}
+		if prior.Status == FindingRaised {
+			staleCount++
+			staleIDs = append(staleIDs, f.ID)
+		}
+	}
+
+	if staleCount >= stalenessThreshold {
+		reason := fmt.Sprintf("circuit breaker: %d CRITICAL/MAJOR findings unchanged across rounds %d and %d (%s)",
+			staleCount, currentRound-1, currentRound, strings.Join(staleIDs, ", "))
+		return reason, true
+	}
+	return "", false
+}
+
 // mergeReviewFindingsLocked parses structured findings from reviewer task
 // results, deduplicates them, assigns stable IDs, writes the merged ledger
 // to the workspace, and returns the formatted text for consolidation prompts.
@@ -3484,6 +3649,62 @@ func (c *Coordinator) blockGoalLocked(goal *Goal, summary string, content string
 	goal.Summary = compactGoalSummary(summary)
 	goal.CompletedAt = nil
 	c.recordGoalLocked(goal, firstNonEmpty(content, "goal blocked"))
+}
+
+func (c *Coordinator) gateGoalLocked(goal *Goal, gateType string, message string, round int) {
+	if goal == nil {
+		return
+	}
+	goal.Status = GoalGated
+	goal.ActiveGate = &HumanGate{
+		Type:      gateType,
+		Message:   message,
+		Round:     round,
+		CreatedAt: time.Now().UTC(),
+	}
+	c.recordGoalLocked(goal, fmt.Sprintf("goal gated: %s", gateType))
+}
+
+func (c *Coordinator) ResolveGate(goalID string, approved bool, feedback string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	goal, ok := c.goals[goalID]
+	if !ok {
+		return errors.New("goal not found")
+	}
+	if goal.Status != GoalGated || goal.ActiveGate == nil {
+		return errors.New("goal does not have an active gate")
+	}
+
+	gateType := goal.ActiveGate.Type
+	goal.ActiveGate = nil
+
+	if approved {
+		goal.Status = GoalActive
+		goal.Summary = ""
+		c.recordGoalLocked(goal, fmt.Sprintf("gate %s approved by human", gateType))
+		c.signalDispatchLocked()
+		return nil
+	}
+
+	// Rejected
+	switch gateType {
+	case "escalation":
+		goal.Status = GoalBlocked
+		goal.Summary = compactGoalSummary(firstNonEmpty(feedback, "rejected by human at escalation gate"))
+		c.recordGoalLocked(goal, "escalation gate rejected by human")
+	default: // "discovery_review" and others
+		now := time.Now().UTC()
+		goal.Status = GoalFailed
+		goal.Summary = compactGoalSummary(firstNonEmpty(feedback, "requirements rejected by human"))
+		goal.CompletedAt = &now
+		if c.currentGoalID == goal.ID {
+			c.currentGoalID = ""
+		}
+		c.recordGoalLocked(goal, "discovery gate rejected by human")
+	}
+	return nil
 }
 
 func compactGoalSummary(summary string) string {
