@@ -61,6 +61,10 @@ func (s *Server) routes() {
 	s.router.HandleFunc("/api/agents/{name}/resume", s.handleAgentResume).Methods(http.MethodPost)
 	s.router.HandleFunc("/api/goals", s.handleGoals).Methods(http.MethodGet, http.MethodPost)
 	s.router.HandleFunc("/api/goals/{id}", s.handleGoalDetail).Methods(http.MethodGet)
+	s.router.HandleFunc("/api/goals/{id}/start", s.handleGoalStart).Methods(http.MethodPost)
+	s.router.HandleFunc("/api/goals/{id}/stop", s.handleGoalStop).Methods(http.MethodPost)
+	s.router.HandleFunc("/api/goals/{id}/resume", s.handleGoalResume).Methods(http.MethodPost)
+	s.router.HandleFunc("/api/goals/{id}/delete", s.handleGoalDelete).Methods(http.MethodPost)
 	s.router.HandleFunc("/api/goals/{id}/kill", s.handleGoalKill).Methods(http.MethodPost)
 	s.router.HandleFunc("/api/plan", s.handlePlan).Methods(http.MethodGet, http.MethodPost)
 	s.router.HandleFunc("/api/workspace/files", s.handleWorkspaceFiles).Methods(http.MethodGet, http.MethodPost)
@@ -149,6 +153,20 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if err := json.Unmarshal(payload["data"], &req); err == nil {
 					_, _ = s.coordinator.SubmitGoal(req)
 				}
+			case "start_goal":
+				var req struct {
+					GoalID string `json:"goal_id"`
+				}
+				if err := json.Unmarshal(payload["data"], &req); err == nil {
+					_ = s.coordinator.StartGoal(req.GoalID)
+				}
+			case "stop_goal":
+				var req struct {
+					GoalID string `json:"goal_id"`
+				}
+				if err := json.Unmarshal(payload["data"], &req); err == nil {
+					_ = s.coordinator.StopGoal(req.GoalID)
+				}
 			case "override_assignment":
 				var req struct {
 					TaskID   string `json:"task_id"`
@@ -171,12 +189,26 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if err := json.Unmarshal(payload["data"], &req); err == nil {
 					_ = s.coordinator.ResumeAgent(req.Agent)
 				}
+			case "resume_goal":
+				var req struct {
+					GoalID string `json:"goal_id"`
+				}
+				if err := json.Unmarshal(payload["data"], &req); err == nil {
+					_ = s.coordinator.ResumeGoal(req.GoalID)
+				}
+			case "delete_goal":
+				var req struct {
+					GoalID string `json:"goal_id"`
+				}
+				if err := json.Unmarshal(payload["data"], &req); err == nil {
+					_ = s.coordinator.DeleteGoal(req.GoalID)
+				}
 			case "kill_goal":
 				var req struct {
 					GoalID string `json:"goal_id"`
 				}
 				if err := json.Unmarshal(payload["data"], &req); err == nil {
-					_ = s.coordinator.KillGoal(req.GoalID)
+					_ = s.coordinator.StopGoal(req.GoalID)
 				}
 			}
 		}
@@ -379,13 +411,49 @@ func (s *Server) handleGoalDetail(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleGoalKill(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleGoalStart(w http.ResponseWriter, r *http.Request) {
 	goalID := mux.Vars(r)["id"]
-	if err := s.coordinator.KillGoal(goalID); err != nil {
+	if err := s.coordinator.StartGoal(goalID); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "killed"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "started"})
+}
+
+func (s *Server) handleGoalStop(w http.ResponseWriter, r *http.Request) {
+	goalID := mux.Vars(r)["id"]
+	if err := s.coordinator.StopGoal(goalID); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+func (s *Server) handleGoalKill(w http.ResponseWriter, r *http.Request) {
+	goalID := mux.Vars(r)["id"]
+	if err := s.coordinator.StopGoal(goalID); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+func (s *Server) handleGoalResume(w http.ResponseWriter, r *http.Request) {
+	goalID := mux.Vars(r)["id"]
+	if err := s.coordinator.ResumeGoal(goalID); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "resumed"})
+}
+
+func (s *Server) handleGoalDelete(w http.ResponseWriter, r *http.Request) {
+	goalID := mux.Vars(r)["id"]
+	if err := s.coordinator.DeleteGoal(goalID); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {

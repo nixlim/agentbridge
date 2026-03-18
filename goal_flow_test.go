@@ -16,6 +16,7 @@ var taskIDPattern = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 var completedTaskPattern = regexp.MustCompile(`task_completed:.*\(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)`)
 var triggerPattern = regexp.MustCompile(`## Trigger\s+([a-z_]+):`)
 var triggerContextPattern = regexp.MustCompile(`## Trigger\s+[a-z_]+:\s*([\s\S]*?)\n\n## Conversation History`)
+var discussionFilePattern = regexp.MustCompile(`You must write your round/phase discussion record to this workspace file: ([^\n]+)`)
 
 type scriptedAgent struct {
 	name      string
@@ -64,10 +65,12 @@ func (a *scriptedAgent) ParseOutput(raw []byte) (*AgentResult, error) {
 func (a *scriptedAgent) IsAvailable() bool { return a.available }
 
 type hangingFileAgent struct {
-	name      string
-	filePath  string
-	content   string
-	available bool
+	name            string
+	filePath        string
+	content         string
+	discussionBody  string
+	writeDiscussion bool
+	available       bool
 }
 
 func (a *hangingFileAgent) Name() string { return a.name }
@@ -86,6 +89,22 @@ func (a *hangingFileAgent) Execute(ctx context.Context, prompt string, workDir s
 	}
 	if err := os.WriteFile(fullPath, []byte(a.content), 0o644); err != nil {
 		return nil, err
+	}
+	if a.writeDiscussion {
+		matches := discussionFilePattern.FindStringSubmatch(prompt)
+		if len(matches) == 2 {
+			discussionPath := filepath.Join(workDir, filepath.FromSlash(strings.TrimSpace(matches[1])))
+			if err := os.MkdirAll(filepath.Dir(discussionPath), 0o755); err != nil {
+				return nil, err
+			}
+			body := a.discussionBody
+			if body == "" {
+				body = "discussion record"
+			}
+			if err := os.WriteFile(discussionPath, []byte(body), 0o644); err != nil {
+				return nil, err
+			}
+		}
 	}
 	<-ctx.Done()
 	return nil, ctx.Err()
@@ -642,6 +661,104 @@ func TestSpecWorkflowSupportsCrossCritiqueRecipe(t *testing.T) {
 	}
 }
 
+func TestCrossCritiqueVerdictsDoNotBlockConsolidationOutcome(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+	cfg.Team = []TeamMemberConfig{
+		{
+			Name:        "spec-1",
+			Provider:    "claude",
+			Role:        "spec_creator",
+			Count:       1,
+			Description: "Creates technical specifications",
+		},
+		{
+			Name:        "review-codex",
+			Provider:    "codex",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications for implementation readiness",
+		},
+		{
+			Name:        "review-claude",
+			Provider:    "claude",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications from a second perspective",
+		},
+	}
+	cfg.Agents = map[string]AgentConfig{
+		"spec-1": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-codex": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-claude": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+	}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"spec-1": &scriptedAgent{name: "spec-1", responses: []string{
+			"initial spec",
+			"consolidation summary",
+		}, delay: 20 * time.Millisecond, available: true},
+		"review-codex": &scriptedAgent{name: "review-codex", responses: []string{
+			"VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent.",
+			"VERDICT: FAIL\n\nMISSED ISSUES\n- reviewer 1 missed one weakness",
+		}, delay: 20 * time.Millisecond, available: true},
+		"review-claude": &scriptedAgent{name: "review-claude", responses: []string{
+			"VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent.",
+			"VERDICT: FAIL\n\nWEAK OBJECTIONS\n- reviewer 2 over-emphasized a minor issue",
+		}, delay: 20 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	goal, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:          "B4 spec",
+		Description:    "Create and review a technical spec document",
+		WorkflowRecipe: workflowRecipeSpecCrossCritiqueLoop,
+	})
+	if err != nil {
+		t.Fatalf("SubmitGoal() error = %v", err)
+	}
+
+	waitFor(t, 3*time.Second, func() bool {
+		current, _, _, err := coordinator.GetGoal(goal.ID)
+		return err == nil && current.Status == GoalCompleted
+	})
+
+	current, _, _, err := coordinator.GetGoal(goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if current.Status != GoalCompleted {
+		t.Fatalf("expected completed goal despite critique FAIL verdicts, got %s", current.Status)
+	}
+}
+
 func TestCrossCritiqueRecipeStartsWithPreparationOnly(t *testing.T) {
 	cfg := newGoalTestConfig(t.TempDir())
 	cfg.Team = []TeamMemberConfig{
@@ -852,6 +969,304 @@ func TestReviewPromptIncludesDiscussionReferences(t *testing.T) {
 	}
 }
 
+func TestBlockedGoalDoesNotBlockNextGoalOrLeakPlanState(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+	cfg.Team = []TeamMemberConfig{
+		{
+			Name:        "spec-1",
+			Provider:    "claude",
+			Role:        "spec_creator",
+			Count:       1,
+			Description: "Creates technical specifications",
+		},
+		{
+			Name:        "review-codex",
+			Provider:    "codex",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications for implementation readiness",
+		},
+		{
+			Name:        "review-claude",
+			Provider:    "claude",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications from a second perspective",
+		},
+	}
+	cfg.Agents = map[string]AgentConfig{
+		"spec-1": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-codex": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+		"review-claude": {
+			Command:        "mock",
+			TimeoutSeconds: 5,
+			MaxRetries:     1,
+		},
+	}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"spec-1": &scriptedAgent{name: "spec-1", responses: []string{
+			"first spec draft",
+			"first consolidation",
+			"second spec draft",
+		}, delay: 20 * time.Millisecond, available: true},
+		"review-codex": &scriptedAgent{name: "review-codex", responses: []string{
+			"VERDICT: FAIL\n\nissue from codex",
+			"VERDICT: PASS\n\nThe peer review is rigorous enough for the spec creator to rely on.",
+		}, delay: 20 * time.Millisecond, available: true},
+		"review-claude": &scriptedAgent{name: "review-claude", responses: []string{
+			"VERDICT: FAIL\n\nissue from claude",
+			"VERDICT: PASS\n\nThe peer review is rigorous enough for the spec creator to rely on.",
+		}, delay: 20 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	firstGoal, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:           "Blocked spec",
+		Description:     "Create and review a technical spec document",
+		WorkflowRecipe:  workflowRecipeSpecCrossCritiqueLoop,
+		MaxReviewRounds: 1,
+	})
+	if err != nil {
+		t.Fatalf("SubmitGoal(first) error = %v", err)
+	}
+
+	waitFor(t, 3*time.Second, func() bool {
+		current, _, _, err := coordinator.GetGoal(firstGoal.ID)
+		return err == nil && current.Status == GoalBlocked
+	})
+
+	secondGoal, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:          "Fresh spec",
+		Description:    "Create and review a technical spec document",
+		WorkflowRecipe: workflowRecipeSpecCrossCritiqueLoop,
+	})
+	if err != nil {
+		t.Fatalf("SubmitGoal(second) error = %v", err)
+	}
+
+	current, plan, tasks, err := coordinator.GetGoal(secondGoal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal(second) error = %v", err)
+	}
+	if current.Status != GoalActive {
+		t.Fatalf("expected second goal active, got %s", current.Status)
+	}
+	if plan == nil || len(plan.Phases) != 4 {
+		t.Fatalf("expected second goal plan with four phases, got %#v", plan)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected only preparation task created for second goal, got %d", len(tasks))
+	}
+	if tasks[0].AssignedTo != "spec-1" {
+		t.Fatalf("expected second goal prep assigned to spec creator, got %q", tasks[0].AssignedTo)
+	}
+}
+
+func TestResumeBlockedGoalWithIncompletePlan(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+
+	worker := &scriptedAgent{name: "impl-1", responses: []string{"implemented after resume"}, delay: 20 * time.Millisecond, available: true, err: fmt.Errorf("temporary failure")}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"impl-1": worker,
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	goal, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:       "Resume me",
+		Description: "Complete the workflow after a blocked start",
+	})
+	if err != nil {
+		t.Fatalf("SubmitGoal() error = %v", err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		current, _, _, err := coordinator.GetGoal(goal.ID)
+		return err == nil && current.Status == GoalBlocked
+	})
+
+	worker.err = nil
+	if err := coordinator.ResumeGoal(goal.ID); err != nil {
+		t.Fatalf("ResumeGoal() error = %v", err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		current, _, _, err := coordinator.GetGoal(goal.ID)
+		return err == nil && current.Status == GoalCompleted
+	})
+
+	current, _, tasks, err := coordinator.GetGoal(goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if current.Status != GoalCompleted {
+		t.Fatalf("expected completed goal after resume, got %s", current.Status)
+	}
+	if len(tasks) != 1 || tasks[0].Status != TaskCompleted {
+		t.Fatalf("expected completed draft task after resume, got %#v", tasks)
+	}
+}
+
+func TestStopAndStartGoalWithIncompletePlan(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+
+	worker := &scriptedAgent{name: "impl-1", responses: []string{"implemented after restart"}, delay: 250 * time.Millisecond, available: true}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"impl-1": worker,
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	goal, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:       "Stop me",
+		Description: "Pause and restart the workflow",
+	})
+	if err != nil {
+		t.Fatalf("SubmitGoal() error = %v", err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		current, _, tasks, err := coordinator.GetGoal(goal.ID)
+		return err == nil && current.Status == GoalActive && len(tasks) == 1 && tasks[0].Status == TaskRunning
+	})
+
+	if err := coordinator.StopGoal(goal.ID); err != nil {
+		t.Fatalf("StopGoal() error = %v", err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		current, _, tasks, err := coordinator.GetGoal(goal.ID)
+		return err == nil && current.Status == GoalStopped && len(tasks) == 1 && tasks[0].Status == TaskCancelled
+	})
+
+	if err := coordinator.StartGoal(goal.ID); err != nil {
+		t.Fatalf("StartGoal() error = %v", err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		current, _, _, err := coordinator.GetGoal(goal.ID)
+		return err == nil && current.Status == GoalCompleted
+	})
+}
+
+func TestDeleteGoalRemovesState(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"impl-1": &scriptedAgent{name: "impl-1", responses: []string{"implemented feature"}, delay: 500 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	goal, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:       "Delete me",
+		Description: "Remove this workflow from the system",
+	})
+	if err != nil {
+		t.Fatalf("SubmitGoal() error = %v", err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		current, _, tasks, err := coordinator.GetGoal(goal.ID)
+		return err == nil && current.Status == GoalActive && len(tasks) == 1
+	})
+
+	if err := coordinator.StopGoal(goal.ID); err != nil {
+		t.Fatalf("StopGoal() error = %v", err)
+	}
+	if err := coordinator.DeleteGoal(goal.ID); err != nil {
+		t.Fatalf("DeleteGoal() error = %v", err)
+	}
+
+	if _, _, _, err := coordinator.GetGoal(goal.ID); err == nil {
+		t.Fatalf("expected deleted goal lookup to fail")
+	}
+	if len(coordinator.ListGoals()) != 0 {
+		t.Fatalf("expected deleted goal to be removed from goal list")
+	}
+	if len(coordinator.ListTasks()) != 0 {
+		t.Fatalf("expected deleted goal tasks to be removed")
+	}
+	if current, ok := coordinator.Snapshot()["current_goal"].(*Goal); !ok || current != nil {
+		t.Fatalf("expected no current goal after delete, got %#v", coordinator.Snapshot()["current_goal"])
+	}
+	if plan := coordinator.CurrentPlan(); plan != nil {
+		t.Fatalf("expected no current plan after delete, got %#v", plan)
+	}
+}
+
 func TestSpecWorkflowAutoCompletesQuiescentArtifactTask(t *testing.T) {
 	prevTick := workflowTickInterval
 	prevQuiet := fileArtifactQuietThreshold
@@ -903,7 +1318,7 @@ func TestSpecWorkflowAutoCompletesQuiescentArtifactTask(t *testing.T) {
 	defer hub.Shutdown()
 
 	coordinator := NewCoordinator(cfg, map[string]Agent{
-		"spec-1":        &hangingFileAgent{name: "spec-1", filePath: "specs/b2-spec-spec.md", content: "# spec", available: true},
+		"spec-1":        &hangingFileAgent{name: "spec-1", filePath: "specs/b2-spec-spec.md", content: "# spec", discussionBody: "prepared spec", writeDiscussion: true, available: true},
 		"review-codex":  &scriptedAgent{name: "review-codex", responses: []string{"VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent."}, delay: 20 * time.Millisecond, available: true},
 		"review-claude": &scriptedAgent{name: "review-claude", responses: []string{"VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent."}, delay: 20 * time.Millisecond, available: true},
 	}, nil, workspace, store, hub)
@@ -944,7 +1359,176 @@ func TestSpecWorkflowAutoCompletesQuiescentArtifactTask(t *testing.T) {
 	}
 }
 
+func TestSpecWorkflowDoesNotAutoCompleteArtifactTaskWithoutDiscussionRecord(t *testing.T) {
+	prevTick := workflowTickInterval
+	prevQuiet := fileArtifactQuietThreshold
+	workflowTickInterval = 25 * time.Millisecond
+	fileArtifactQuietThreshold = 50 * time.Millisecond
+	defer func() {
+		workflowTickInterval = prevTick
+		fileArtifactQuietThreshold = prevQuiet
+	}()
+
+	cfg := newGoalTestConfig(t.TempDir())
+	cfg.Team = []TeamMemberConfig{
+		{
+			Name:        "spec-1",
+			Provider:    "claude",
+			Role:        "spec_creator",
+			Count:       1,
+			Description: "Creates specifications",
+		},
+		{
+			Name:        "review-codex",
+			Provider:    "codex",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications",
+		},
+		{
+			Name:        "review-claude",
+			Provider:    "claude",
+			Role:        "reviewer",
+			Count:       1,
+			Description: "Reviews specifications from a second perspective",
+		},
+	}
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"spec-1":        &hangingFileAgent{name: "spec-1", filePath: "specs/b2-spec-spec.md", content: "# spec", writeDiscussion: false, available: true},
+		"review-codex":  &scriptedAgent{name: "review-codex", responses: []string{"VERDICT: PASS"}, delay: 20 * time.Millisecond, available: true},
+		"review-claude": &scriptedAgent{name: "review-claude", responses: []string{"VERDICT: PASS"}, delay: 20 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	coordinator.Start()
+	defer func() { _ = coordinator.Stop(context.Background()) }()
+
+	goal, err := coordinator.SubmitGoal(CreateGoalRequest{
+		Title:       "B2 spec",
+		Description: "Create and review a technical spec document",
+	})
+	if err != nil {
+		t.Fatalf("SubmitGoal() error = %v", err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	current, plan, tasks, err := coordinator.GetGoal(goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if current.Status != GoalActive {
+		t.Fatalf("expected active goal while prepare task remains in progress, got %s", current.Status)
+	}
+	if plan == nil || len(plan.Phases) == 0 {
+		t.Fatalf("expected plan to remain present, got %#v", plan)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected only prepare task before review starts, got %d", len(tasks))
+	}
+	if tasks[0].Status != TaskRunning {
+		t.Fatalf("expected prepare task to stay running without discussion record, got %s", tasks[0].Status)
+	}
+}
+
+func TestSnapshotUsesBlockedGoalWithIncompletePlanAsCurrentGoal(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{}, nil, workspace, store, hub)
+	goal := &Goal{
+		ID:      "goal-blocked",
+		Title:   "Blocked goal",
+		Status:  GoalBlocked,
+		Summary: "needs resume",
+	}
+	task := &Task{
+		ID:         "task-pending",
+		GoalID:     goal.ID,
+		Title:      "Pending work",
+		AssignedTo: "impl-1",
+		Status:     TaskPending,
+		CreatedAt:  time.Now().UTC(),
+	}
+	plan := &Plan{
+		ID:     "plan-1",
+		GoalID: goal.ID,
+		Phases: []Phase{{
+			Number: 1,
+			Title:  "Phase 1",
+			Tasks: []PlannedTask{{
+				TempID:     "p1",
+				Title:      task.Title,
+				AssignTo:   task.AssignedTo,
+				RealTaskID: task.ID,
+			}},
+		}},
+	}
+
+	coordinator.mu.Lock()
+	coordinator.goals[goal.ID] = goal
+	coordinator.goalOrder = append(coordinator.goalOrder, goal.ID)
+	coordinator.tasks[task.ID] = task
+	coordinator.taskOrder = append(coordinator.taskOrder, task.ID)
+	coordinator.brainState.CurrentPlan = plan
+	coordinator.planExecutor = NewPlanExecutor(plan)
+	coordinator.mu.Unlock()
+
+	snapshot := coordinator.Snapshot()
+	currentGoal, ok := snapshot["current_goal"].(*Goal)
+	if !ok || currentGoal == nil {
+		t.Fatalf("expected blocked goal to surface as current_goal, got %#v", snapshot["current_goal"])
+	}
+	if currentGoal.ID != goal.ID {
+		t.Fatalf("expected current_goal %q, got %q", goal.ID, currentGoal.ID)
+	}
+
+	workflow, ok := snapshot["workflow"].(WorkflowState)
+	if !ok {
+		t.Fatalf("expected workflow state, got %#v", snapshot["workflow"])
+	}
+	if workflow.Status != string(GoalBlocked) {
+		t.Fatalf("expected blocked workflow state, got %q", workflow.Status)
+	}
+}
+
 func TestSpecWorkflowHonorsGoalReviewRoundOverride(t *testing.T) {
+	prevTick := workflowTickInterval
+	prevQuiet := fileArtifactQuietThreshold
+	workflowTickInterval = 25 * time.Millisecond
+	fileArtifactQuietThreshold = 50 * time.Millisecond
+	defer func() {
+		workflowTickInterval = prevTick
+		fileArtifactQuietThreshold = prevQuiet
+	}()
+
 	cfg := newGoalTestConfig(t.TempDir())
 	cfg.Workflow.DefaultReviewRounds = 6
 	cfg.Team = []TeamMemberConfig{
@@ -1004,7 +1588,7 @@ func TestSpecWorkflowHonorsGoalReviewRoundOverride(t *testing.T) {
 	defer hub.Shutdown()
 
 	coordinator := NewCoordinator(cfg, map[string]Agent{
-		"spec-1":        &scriptedAgent{name: "spec-1", responses: []string{"initial spec", "revised spec"}, delay: 20 * time.Millisecond, available: true},
+		"spec-1":        &hangingFileAgent{name: "spec-1", filePath: "specs/b2-spec-spec.md", content: "# revised spec", discussionBody: "consolidated discussion", writeDiscussion: true, available: true},
 		"review-codex":  &scriptedAgent{name: "review-codex", responses: []string{"VERDICT: FAIL\n\nBLOCKERS\n- still ambiguous", "VERDICT: FAIL\n\nBLOCKERS\n- still ambiguous"}, delay: 20 * time.Millisecond, available: true},
 		"review-claude": &scriptedAgent{name: "review-claude", responses: []string{"VERDICT: FAIL\n\nBLOCKERS\n- still ambiguous", "VERDICT: FAIL\n\nBLOCKERS\n- still ambiguous"}, delay: 20 * time.Millisecond, available: true},
 	}, nil, workspace, store, hub)
@@ -1251,5 +1835,259 @@ func TestRecoverFromLogRestoresActiveGoalAndWorkflow(t *testing.T) {
 	}
 	if len(plan.Phases) != 1 || len(plan.Phases[0].Tasks) != 1 || plan.Phases[0].Tasks[0].RealTaskID == "" {
 		t.Fatalf("restored plan missing real task mapping: %#v", plan)
+	}
+}
+
+func TestRecoverFromLogResumeBlockedGoalContinuesFromNextPhase(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{}, nil, workspace, store, hub)
+
+	goal := &Goal{
+		ID:             "goal-blocked-recover",
+		Title:          "Resume later phase",
+		Description:    "Should continue from phase 2",
+		WorkflowRecipe: workflowRecipeSpecReviewLoop,
+		Status:         GoalBlocked,
+		Summary:        "blocked awaiting resume",
+		CreatedAt:      time.Now().UTC(),
+	}
+	phaseOneTask := &Task{
+		ID:         "task-phase-1",
+		GoalID:     goal.ID,
+		Title:      "Prepare Spec",
+		AssignedTo: "impl-1",
+		Status:     TaskCompleted,
+		CreatedAt:  time.Now().UTC(),
+	}
+	plan := &Plan{
+		ID:     "plan-recover",
+		GoalID: goal.ID,
+		Phases: []Phase{
+			{
+				Number: 1,
+				Title:  "Prepare Spec",
+				Tasks: []PlannedTask{{
+					TempID:     "prepare-spec-r1",
+					Title:      phaseOneTask.Title,
+					AssignTo:   phaseOneTask.AssignedTo,
+					RealTaskID: phaseOneTask.ID,
+				}},
+			},
+			{
+				Number: 2,
+				Title:  "Review Spec",
+				Tasks: []PlannedTask{{
+					TempID:     "review-spec-r1-1",
+					Title:      "Review Spec",
+					AssignTo:   "impl-1",
+					DependsOn:  []string{"prepare-spec-r1"},
+				}},
+			},
+		},
+		CreatedAt: time.Now().UTC(),
+		Version:   1,
+	}
+
+	coordinator.mu.Lock()
+	coordinator.goals[goal.ID] = goal
+	coordinator.goalOrder = append(coordinator.goalOrder, goal.ID)
+	coordinator.tasks[phaseOneTask.ID] = phaseOneTask
+	coordinator.taskOrder = append(coordinator.taskOrder, phaseOneTask.ID)
+	coordinator.brainState.CurrentPlan = plan
+	coordinator.planExecutor = NewPlanExecutor(plan)
+	goal.PlanID = plan.ID
+	coordinator.recordGoalLocked(goal, "goal blocked")
+	coordinator.recordTaskLocked(phaseOneTask, "task completed")
+	coordinator.recordPlanLocked(plan, "coordinator", "plan updated")
+	coordinator.mu.Unlock()
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("logStore.Close() error = %v", err)
+	}
+	hub.Shutdown()
+
+	store, err = NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() reopen error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub = NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	recovered := NewCoordinator(cfg, map[string]Agent{
+		"impl-1": &scriptedAgent{name: "impl-1", responses: []string{"done"}, delay: 20 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+	if err := recovered.RecoverFromLog(); err != nil {
+		t.Fatalf("RecoverFromLog() error = %v", err)
+	}
+
+	if recovered.planExecutor == nil {
+		t.Fatalf("expected recovered plan executor")
+	}
+	if !recovered.planExecutor.executedPhases[0] {
+		t.Fatalf("expected phase 1 to be marked executed after recovery")
+	}
+	if next := recovered.nextUnexecutedPhaseLocked(); next != 1 {
+		t.Fatalf("nextUnexecutedPhaseLocked() = %d, want 1", next)
+	}
+
+	if err := recovered.ResumeGoal(goal.ID); err != nil {
+		t.Fatalf("ResumeGoal() error = %v", err)
+	}
+
+	current, planAfter, tasks, err := recovered.GetGoal(goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if current.Status != GoalActive {
+		t.Fatalf("expected goal active after resume, got %s", current.Status)
+	}
+	if planAfter == nil || len(planAfter.Phases) != 2 {
+		t.Fatalf("expected recovered plan with 2 phases, got %#v", planAfter)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected phase 2 task to be created on resume without duplicating phase 1, got %d tasks", len(tasks))
+	}
+	if tasks[0].ID != phaseOneTask.ID {
+		t.Fatalf("unexpected task set after resume: %#v", tasks)
+	}
+	if tasks[1].Title != "Review Spec" || tasks[1].Status != TaskPending {
+		t.Fatalf("expected resumed phase 2 task to be created pending, got %#v", tasks[1])
+	}
+}
+
+func TestResumeGoalDoesNotRetryCancelledTasksFromEarlierPhases(t *testing.T) {
+	cfg := newGoalTestConfig(t.TempDir())
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{
+		"impl-1": &scriptedAgent{name: "impl-1", responses: []string{"reviewed after resume"}, delay: 20 * time.Millisecond, available: true},
+	}, nil, workspace, store, hub)
+
+	goal := &Goal{
+		ID:         "goal-resume-phase-scope",
+		Title:      "Resume phase scope",
+		Status:     GoalBlocked,
+		Summary:    "blocked before phase 2",
+		CreatedAt:  time.Now().UTC(),
+		PlanID:     "plan-phase-scope",
+	}
+	completedAt := time.Now().UTC()
+	oldCancelled := &Task{
+		ID:          "task-old-prepare",
+		GoalID:      goal.ID,
+		Title:       "Prepare Spec",
+		AssignedTo:  "impl-1",
+		Status:      TaskCancelled,
+		Result:      "stopped with goal",
+		CompletedAt: &completedAt,
+		CreatedAt:   time.Now().UTC(),
+		PlanPhase:   1,
+	}
+	phaseOneCompleted := &Task{
+		ID:        "task-phase-1-complete",
+		GoalID:    goal.ID,
+		Title:     "Consolidate Review Round 3",
+		AssignedTo:"impl-1",
+		Status:    TaskCompleted,
+		CreatedAt: time.Now().UTC(),
+		PlanPhase: 10,
+	}
+	plan := &Plan{
+		ID:     goal.PlanID,
+		GoalID: goal.ID,
+		Phases: []Phase{
+			{
+				Number: 10,
+				Title:  "Consolidate Review Round 3",
+				Tasks: []PlannedTask{{
+					TempID:     "consolidate-spec-r3",
+					Title:      phaseOneCompleted.Title,
+					AssignTo:   "impl-1",
+					RealTaskID: phaseOneCompleted.ID,
+				}},
+			},
+			{
+				Number: 11,
+				Title:  "Adversarial Review Round 4",
+				Tasks: []PlannedTask{{
+					TempID:    "review-spec-r4-1",
+					Title:     "Adversarial Review Round 4 Reviewer 1",
+					AssignTo:  "impl-1",
+					DependsOn: []string{"consolidate-spec-r3"},
+				}},
+			},
+		},
+		CreatedAt: time.Now().UTC(),
+		Version:   1,
+	}
+
+	coordinator.mu.Lock()
+	coordinator.goals[goal.ID] = goal
+	coordinator.goalOrder = append(coordinator.goalOrder, goal.ID)
+	coordinator.tasks[oldCancelled.ID] = oldCancelled
+	coordinator.tasks[phaseOneCompleted.ID] = phaseOneCompleted
+	coordinator.taskOrder = append(coordinator.taskOrder, oldCancelled.ID, phaseOneCompleted.ID)
+	coordinator.brainState.CurrentPlan = plan
+	coordinator.planExecutor = NewPlanExecutor(plan)
+	coordinator.planExecutor.executedPhases[0] = true
+	coordinator.planExecutor.currentPhase = 0
+	coordinator.planExecutor.tempToReal["consolidate-spec-r3"] = phaseOneCompleted.ID
+	coordinator.recordGoalLocked(goal, "goal blocked")
+	coordinator.recordPlanLocked(plan, "coordinator", "plan updated")
+	coordinator.mu.Unlock()
+
+	if err := coordinator.ResumeGoal(goal.ID); err != nil {
+		t.Fatalf("ResumeGoal() error = %v", err)
+	}
+
+	current, currentPlan, tasks, err := coordinator.GetGoal(goal.ID)
+	if err != nil {
+		t.Fatalf("GetGoal() error = %v", err)
+	}
+	if current.Status != GoalActive {
+		t.Fatalf("expected active goal after resume, got %s", current.Status)
+	}
+	if len(tasks) != 3 {
+		t.Fatalf("expected old cancelled task plus one completed and one resumed phase task, got %d", len(tasks))
+	}
+	if tasks[0].ID != oldCancelled.ID || tasks[0].Status != TaskCancelled {
+		t.Fatalf("expected old cancelled task to remain cancelled, got %#v", tasks[0])
+	}
+	if tasks[2].Title != "Adversarial Review Round 4 Reviewer 1" || tasks[2].Status != TaskPending {
+		t.Fatalf("expected only phase-11 task to be created pending, got %#v", tasks[2])
+	}
+	if currentPlan == nil || currentPlan.Phases[1].Tasks[0].RealTaskID == "" {
+		t.Fatalf("expected resumed phase task mapping to be written into plan, got %#v", currentPlan)
 	}
 }

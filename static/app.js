@@ -25,7 +25,10 @@ const refs = {
   workspaceUploadInput: document.getElementById("workspace-upload-input"),
   workspaceUploadDir: document.getElementById("workspace-upload-dir"),
   workspaceTree: document.getElementById("workspace-tree"),
-  killGoal: document.getElementById("kill-goal"),
+  startGoal: document.getElementById("start-goal"),
+  stopGoal: document.getElementById("stop-goal"),
+  resumeGoal: document.getElementById("resume-goal"),
+  deleteGoal: document.getElementById("delete-goal"),
   goalbar: document.getElementById("goalbar"),
   goalTitle: document.getElementById("goal-title"),
   goalStatus: document.getElementById("goal-status"),
@@ -124,7 +127,10 @@ function init() {
   });
   refs.clearMessages.addEventListener("click", () => apiPost("/api/messages/clear"));
   refs.clearTasks.addEventListener("click", () => apiPost("/api/tasks/clear"));
-  refs.killGoal.addEventListener("click", killGoal);
+  refs.startGoal.addEventListener("click", startGoal);
+  refs.stopGoal.addEventListener("click", stopGoal);
+  refs.resumeGoal.addEventListener("click", resumeGoal);
+  refs.deleteGoal.addEventListener("click", deleteGoal);
   refs.refreshWorkspace.addEventListener("click", refreshWorkspace);
   refs.uploadWorkspace.addEventListener("click", uploadWorkspaceFiles);
   refs.goalForm.addEventListener("submit", submitGoal);
@@ -211,7 +217,7 @@ function hydrateState(data) {
   state.agents = data.agents || {};
   state.tasks = data.tasks || [];
   state.goals = data.goals || [];
-  state.currentGoal = data.current_goal || null;
+  state.currentGoal = data.current_goal || chooseCurrentGoal();
   state.plan = data.plan || null;
   state.workflow = data.workflow || {};
   state.workspace = data.workspace || {};
@@ -302,6 +308,10 @@ function renderGoalBar() {
     refs.goalStatus.textContent = "";
     refs.goalProgressLabel.textContent = "0 / 0";
     refs.goalProgressBar.style.width = "0%";
+    refs.startGoal.classList.add("hidden");
+    refs.stopGoal.classList.add("hidden");
+    refs.resumeGoal.classList.add("hidden");
+    refs.deleteGoal.classList.add("hidden");
     return;
   }
 
@@ -334,15 +344,47 @@ function renderGoalBar() {
       : `phase ${state.workflow.current_phase_number}`;
     parts.push(state.workflow.current_phase_title ? `${phaseLabel} ${state.workflow.current_phase_title}` : phaseLabel);
   }
-  if (goal.summary && (goal.status === "blocked" || goal.status === "failed")) {
-    parts.push(goal.summary);
+  if (goal.summary && (goal.status === "blocked" || goal.status === "failed" || goal.status === "stopped")) {
+    parts.push(clampText(goal.summary, 220));
   } else if (goal.description) {
-    parts.push(goal.description);
+    parts.push(clampText(goal.description, 180));
   }
 
   refs.goalStatus.textContent = parts.filter(Boolean).join(" • ");
   refs.goalProgressLabel.textContent = `${completed} / ${total}`;
   refs.goalProgressBar.style.width = `${percent}%`;
+  refs.startGoal.classList.toggle("hidden", !canStartGoal(goal));
+  refs.stopGoal.classList.toggle("hidden", !canStopGoal(goal));
+  refs.resumeGoal.classList.toggle("hidden", !canResumeGoal(goal));
+  refs.deleteGoal.classList.toggle("hidden", !canDeleteGoal(goal));
+}
+
+function canStartGoal(goal) {
+  if (!goal || !state.plan || state.plan.goal_id !== goal.id) return false;
+  return goal.status === "stopped" && !isPlanCompleteForGoal(goal.id);
+}
+
+function canStopGoal(goal) {
+  return Boolean(goal && (goal.status === "planning" || goal.status === "active"));
+}
+
+function canResumeGoal(goal) {
+  if (!goal || !state.plan || state.plan.goal_id !== goal.id) return false;
+  if (!["blocked", "failed"].includes(goal.status)) return false;
+  return !isPlanCompleteForGoal(goal.id);
+}
+
+function canDeleteGoal(goal) {
+  return Boolean(goal);
+}
+
+function isPlanCompleteForGoal(goalID) {
+  if (!state.plan || state.plan.goal_id !== goalID) return true;
+  return (state.plan.phases || []).every((phase) => (phase.tasks || []).every((plannedTask) => {
+    if (!plannedTask.real_task_id) return false;
+    const actual = state.tasks.find((task) => task.id === plannedTask.real_task_id);
+    return actual && actual.status === "completed";
+  }));
 }
 
 function renderWorkspace() {
@@ -490,12 +532,15 @@ function formatWorkflowStatus(workflow) {
       : `phase ${workflow.current_phase_number}`;
     parts.push(workflow.current_phase_title ? `${phaseLabel} ${workflow.current_phase_title}` : phaseLabel);
   }
-  if (workflow.last_error) parts.push(`error: ${workflow.last_error}`);
+  if (workflow.last_error) parts.push(`error: ${clampText(workflow.last_error, 220)}`);
   return parts.join(" • ");
 }
 
 function formatWorkflowProcess(invocation, workflow) {
   if (!invocation) {
+    if (workflow && workflow.status === "stopped" && workflow.last_error) {
+      return `Workflow stopped • ${workflow.last_error}`;
+    }
     if (workflow && workflow.status === "blocked" && workflow.last_error) {
       return `Workflow blocked • ${workflow.last_error}`;
     }
@@ -521,11 +566,11 @@ function formatWorkflowGuidance(workflow, goal) {
   lines.push(`Recipe: ${workflow.recipe || workflow.mode || "deterministic"}`);
   if (workflow.stage) lines.push(`Stage: ${workflow.stage.replaceAll("_", " ")}`);
   if (workflow.stage_detail) lines.push(workflow.stage_detail);
-  if (goal.summary && (goal.status === "blocked" || goal.status === "failed")) {
-    lines.push(`Failure: ${goal.summary}`);
+  if (goal.summary && (goal.status === "blocked" || goal.status === "failed" || goal.status === "stopped")) {
+    lines.push(`Failure: ${clampText(goal.summary, 320)}`);
   }
   if (workflow.last_error && workflow.last_error !== goal.summary) {
-    lines.push(`Coordinator note: ${workflow.last_error}`);
+    lines.push(`Coordinator note: ${clampText(workflow.last_error, 320)}`);
   }
   return lines.join("\n\n");
 }
@@ -543,6 +588,7 @@ function renderPlan() {
 
   const grid = document.createElement("div");
   grid.className = "plan-grid";
+  const plannedTaskLookup = buildPlannedTaskLookup(state.plan);
 
   state.plan.phases.forEach((phase) => {
     const phaseCard = document.createElement("article");
@@ -597,10 +643,17 @@ function renderPlan() {
       const deps = document.createElement("div");
       deps.className = "card-meta";
       deps.textContent = plannedTask.depends_on && plannedTask.depends_on.length
-        ? `depends on ${plannedTask.depends_on.join(", ")}`
+        ? `depends on ${resolvePlanDependencyLabels(plannedTask.depends_on, plannedTaskLookup).join(", ")}`
         : "no dependencies";
 
-      taskEl.append(taskHeader, meta, desc, deps);
+      const refs = document.createElement("div");
+      refs.className = "card-meta";
+      const referenceFiles = actual
+        ? combineReferenceList(actual.discussion_file, actual.files_touched, actual.files_changed)
+        : [];
+      refs.textContent = referenceFiles.length ? `files ${referenceFiles.join(", ")}` : "no file refs yet";
+
+      taskEl.append(taskHeader, meta, desc, deps, refs);
       tasks.appendChild(taskEl);
     });
 
@@ -609,6 +662,42 @@ function renderPlan() {
   });
 
   refs.planView.appendChild(grid);
+}
+
+function buildPlannedTaskLookup(plan) {
+  const lookup = new Map();
+  if (!plan || !plan.phases) return lookup;
+  plan.phases.forEach((phase) => {
+    (phase.tasks || []).forEach((task) => {
+      if (task.temp_id) lookup.set(task.temp_id, task);
+    });
+  });
+  return lookup;
+}
+
+function resolvePlanDependencyLabels(dependsOn, plannedTaskLookup) {
+  return (dependsOn || []).map((dep) => {
+    const planned = plannedTaskLookup.get(dep);
+    if (!planned) return dep;
+    const actual = planned.real_task_id
+      ? state.tasks.find((task) => task.id === planned.real_task_id)
+      : null;
+    if (actual) return actual.title;
+    return planned.title || dep;
+  });
+}
+
+function combineReferenceList(...groups) {
+  const values = new Set();
+  groups.flat().forEach((entry) => {
+    if (typeof entry === "string" && entry.trim()) values.add(entry.trim());
+  });
+  return Array.from(values);
+}
+
+function clampText(value, limit) {
+  if (!value || value.length <= limit) return value;
+  return `${value.slice(0, limit - 1)}…`;
 }
 
 function renderAgents() {
@@ -988,6 +1077,22 @@ async function submitGoal(event) {
   refs.goalInputReviewRounds.value = "";
 }
 
+async function startGoal() {
+  if (!state.currentGoal) return;
+  await apiPost(`/api/goals/${state.currentGoal.id}/start`);
+}
+
+async function stopGoal() {
+  if (!state.currentGoal) return;
+  if (!window.confirm(`Stop goal "${state.currentGoal.title}"?`)) return;
+  await apiPost(`/api/goals/${state.currentGoal.id}/stop`);
+}
+
+async function resumeGoal() {
+  if (!state.currentGoal) return;
+  await apiPost(`/api/goals/${state.currentGoal.id}/resume`);
+}
+
 async function submitComposer(event) {
   event.preventDefault();
   if (refs.sendMode.value === "task") {
@@ -1009,10 +1114,10 @@ async function submitComposer(event) {
   refs.dependsOn.value = "";
 }
 
-async function killGoal() {
+async function deleteGoal() {
   if (!state.currentGoal) return;
-  if (!window.confirm(`Kill goal "${state.currentGoal.title}"?`)) return;
-  await apiPost(`/api/goals/${state.currentGoal.id}/kill`);
+  if (!window.confirm(`Delete goal "${state.currentGoal.title}" permanently?`)) return;
+  await apiPost(`/api/goals/${state.currentGoal.id}/delete`);
 }
 
 function togglePlanEditor() {
@@ -1098,7 +1203,20 @@ function upsertGoal(goal) {
   } else {
     state.goals.push(goal);
   }
-  state.currentGoal = state.goals.find((entry) => ["planning", "active", "blocked"].includes(entry.status)) || goal;
+  state.currentGoal = chooseCurrentGoal() || goal;
+}
+
+function chooseCurrentGoal() {
+  if (state.plan && state.plan.goal_id) {
+    const goalFromPlan = state.goals.find((entry) => entry.id === state.plan.goal_id);
+    if (goalFromPlan && ["planning", "active", "blocked", "stopped", "failed"].includes(goalFromPlan.status) && !isPlanCompleteForGoal(goalFromPlan.id)) {
+      return goalFromPlan;
+    }
+  }
+  return state.goals
+    .slice()
+    .reverse()
+    .find((entry) => ["planning", "active", "blocked", "stopped", "failed"].includes(entry.status)) || null;
 }
 
 function currentTaskForAgent(agentName) {

@@ -155,7 +155,8 @@ h1, h2, h3, p {
 /* ---- Goal Bar ---- */
 
 .goalbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(160px, 320px) auto;
   align-items: center;
   gap: 16px;
   padding: 8px 20px;
@@ -169,9 +170,10 @@ h1, h2, h3, p {
 
 .goalbar-info {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
 }
 
 .goalbar-title {
@@ -182,6 +184,10 @@ h1, h2, h3, p {
 .goalbar-status {
   font-size: 11px;
   color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .goalbar-progress {
@@ -218,6 +224,7 @@ h1, h2, h3, p {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+  justify-self: end;
 }
 
 /* ---- Tab Bar ---- */

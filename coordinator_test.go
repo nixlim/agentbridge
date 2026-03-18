@@ -282,6 +282,79 @@ func TestRecoverFromLogRequeuesStaleRunningTask(t *testing.T) {
 	}
 }
 
+func TestDetectIntegrationConflictIgnoresCrossCritiqueTasks(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.Workspace.Path = t.TempDir()
+	cfg.Workspace.InitGit = false
+	cfg.Log.File = filepath.Join(t.TempDir(), "agentbridge.log")
+
+	workspace := NewWorkspace(cfg.Workspace)
+	if err := workspace.Init(); err != nil {
+		t.Fatalf("workspace.Init() error = %v", err)
+	}
+
+	store, err := NewMessageStore(cfg.Log.File)
+	if err != nil {
+		t.Fatalf("NewMessageStore() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	hub := NewWebSocketHub()
+	go hub.Run()
+	defer hub.Shutdown()
+
+	coordinator := NewCoordinator(cfg, map[string]Agent{}, nil, workspace, store, hub)
+	goal := &Goal{
+		ID:        "goal-cross-critique",
+		Title:     "Cross critique goal",
+		Status:    GoalActive,
+		CreatedAt: time.Now().UTC(),
+	}
+	plan := &Plan{
+		ID:     "plan-cross-critique",
+		GoalID: goal.ID,
+		Phases: []Phase{
+			{Number: 11, Title: "Adversarial Review Round 4"},
+			{Number: 12, Title: "Cross Critique Round 4"},
+			{Number: 13, Title: "Consolidate Review Round 4"},
+		},
+		CreatedAt: time.Now().UTC(),
+		Version:   1,
+	}
+	other := &Task{
+		ID:          "other-task",
+		GoalID:      goal.ID,
+		Title:       "Cross Critique Reviewer 1",
+		Status:      TaskCompleted,
+		PlanPhase:   12,
+		FilesChanged: []string{"specs/b4-spec-spec.md"},
+		CreatedAt:   time.Now().UTC(),
+	}
+	current := &Task{
+		ID:        "current-task",
+		GoalID:    goal.ID,
+		Title:     "Cross Critique Reviewer 2",
+		Status:    TaskCompleted,
+		PlanPhase: 12,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	coordinator.mu.Lock()
+	coordinator.goals[goal.ID] = goal
+	coordinator.goalOrder = append(coordinator.goalOrder, goal.ID)
+	coordinator.tasks[other.ID] = other
+	coordinator.tasks[current.ID] = current
+	coordinator.taskOrder = append(coordinator.taskOrder, other.ID, current.ID)
+	coordinator.brainState.CurrentPlan = plan
+	coordinator.mu.Unlock()
+
+	if got := coordinator.detectIntegrationConflictLocked(current, []string{"specs/b4-spec-spec.md"}); got != "" {
+		t.Fatalf("expected no integration conflict for cross-critique task, got %q", got)
+	}
+}
+
 func TestRecoverFromLogKeepsLiveRunningTask(t *testing.T) {
 	t.Parallel()
 

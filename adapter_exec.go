@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -53,7 +54,7 @@ func executeAdapterCommand(ctx context.Context, config AgentConfig, workspacePat
 
 	cmd := exec.Command(config.Command, args...)
 	cmd.Dir = chooseWorkDir(workDir, config.WorkingDir, workspacePath)
-	cmd.Env = append(os.Environ(), flattenEnv(config.Env)...)
+	cmd.Env = buildAdapterEnv(config.Env, workspacePath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	observer := commandTelemetryObserverFromContext(ctx)
 
@@ -139,6 +140,90 @@ func executeAdapterCommand(ctx context.Context, config AgentConfig, workspacePat
 	result.DurationMs = duration.Milliseconds()
 	return result, nil
 }
+
+func buildAdapterEnv(extra map[string]string, workspacePath string) []string {
+	env := append([]string{}, os.Environ()...)
+	env = append(env, flattenEnv(extra)...)
+
+	guardEnv, err := workspaceGitGuardEnv(workspacePath)
+	if err == nil {
+		env = append(env, guardEnv...)
+	}
+	return env
+}
+
+func workspaceGitGuardEnv(workspacePath string) ([]string, error) {
+	if strings.TrimSpace(workspacePath) == "" {
+		return nil, errors.New("workspace path is required")
+	}
+	workspacePath = filepath.Clean(workspacePath)
+	guardDir := filepath.Join(workspacePath, ".agentbridge", "bin")
+	if err := os.MkdirAll(guardDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create git guard dir: %w", err)
+	}
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		realGit = "git"
+	}
+
+	wrapperPath := filepath.Join(guardDir, "git")
+	if err := os.WriteFile(wrapperPath, []byte(gitGuardScript), 0o755); err != nil {
+		return nil, fmt.Errorf("write git guard wrapper: %w", err)
+	}
+
+	return []string{
+		fmt.Sprintf("PATH=%s%c%s", guardDir, os.PathListSeparator, os.Getenv("PATH")),
+		fmt.Sprintf("AGENTBRIDGE_WORKSPACE=%s", workspacePath),
+		fmt.Sprintf("AGENTBRIDGE_REAL_GIT=%s", realGit),
+		fmt.Sprintf("GIT_CEILING_DIRECTORIES=%s", workspacePath),
+		fmt.Sprintf("GIT_DIR=%s", filepath.Join(workspacePath, ".git")),
+		fmt.Sprintf("GIT_WORK_TREE=%s", workspacePath),
+	}, nil
+}
+
+const gitGuardScript = `#!/bin/sh
+set -eu
+
+workspace="${AGENTBRIDGE_WORKSPACE:-}"
+real_git="${AGENTBRIDGE_REAL_GIT:-git}"
+
+if [ -z "$workspace" ]; then
+  echo "AgentBridge git guard: workspace is not configured" >&2
+  exit 1
+fi
+
+prev=""
+for arg in "$@"; do
+  case "$prev" in
+    -C|--git-dir|--work-tree)
+      echo "AgentBridge git guard: git directory overrides are disabled" >&2
+      exit 1
+      ;;
+  esac
+  case "$arg" in
+    push)
+      echo "AgentBridge git guard: git push is disabled" >&2
+      exit 1
+      ;;
+    -C|--git-dir|--work-tree)
+      prev="$arg"
+      continue
+      ;;
+    --git-dir=*|--work-tree=*|-C*)
+      echo "AgentBridge git guard: git directory overrides are disabled" >&2
+      exit 1
+      ;;
+  esac
+  prev=""
+done
+
+export GIT_CEILING_DIRECTORIES="$workspace"
+export GIT_DIR="$workspace/.git"
+export GIT_WORK_TREE="$workspace"
+
+exec "$real_git" "$@"
+`
 
 func exitCodeFromError(err error) int {
 	if err == nil {

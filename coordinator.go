@@ -160,12 +160,19 @@ func (c *Coordinator) RecoverFromLog() error {
 			c.planExecutor = NewPlanExecutor(&plan)
 		}
 	}
+	if c.brainState.CurrentPlan != nil && c.planExecutor != nil {
+		c.mergeExistingPlanStateLocked(c.brainState.CurrentPlan, c.planExecutor)
+	}
 	for i := len(c.goalOrder) - 1; i >= 0; i-- {
 		goal := c.goals[c.goalOrder[i]]
 		if goal == nil {
 			continue
 		}
-		if goal.Status == GoalPlanning || goal.Status == GoalActive || goal.Status == GoalBlocked {
+		if goal.Status == GoalPlanning || goal.Status == GoalActive {
+			c.currentGoalID = goal.ID
+			break
+		}
+		if (goal.Status == GoalStopped || goal.Status == GoalBlocked || goal.Status == GoalFailed) && c.goalHasIncompletePlanLocked(goal.ID) {
 			c.currentGoalID = goal.ID
 			break
 		}
@@ -256,6 +263,16 @@ func (c *Coordinator) CurrentPlan() *Plan {
 	return &clone
 }
 
+func (c *Coordinator) goalHasIncompletePlanLocked(goalID string) bool {
+	if goalID == "" || c.brainState.CurrentPlan == nil || c.planExecutor == nil {
+		return false
+	}
+	if c.brainState.CurrentPlan.GoalID != goalID {
+		return false
+	}
+	return !c.allPlannedTasksCompletedLocked()
+}
+
 func (c *Coordinator) BrainHistory() []BrainMessage {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -326,7 +343,7 @@ func (c *Coordinator) SubmitGoal(req CreateGoalRequest) (*Goal, error) {
 		c.mu.Unlock()
 		return nil, errors.New("coordinator is shutting down")
 	}
-	if active := c.currentGoalLocked(); active != nil && (active.Status == GoalPlanning || active.Status == GoalActive || active.Status == GoalBlocked) {
+	if active := c.currentGoalLocked(); active != nil && (active.Status == GoalPlanning || active.Status == GoalActive) {
 		c.mu.Unlock()
 		return nil, errors.New("an active goal already exists")
 	}
@@ -362,6 +379,12 @@ func (c *Coordinator) SubmitGoal(req CreateGoalRequest) (*Goal, error) {
 	defer c.mu.RUnlock()
 	clone := *c.goals[goal.ID]
 	return &clone, nil
+}
+
+func (c *Coordinator) StartGoal(goalID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resumeGoalLocked(goalID, "goal started")
 }
 
 func (c *Coordinator) SendHumanMessage(to, content string) error {
@@ -473,7 +496,94 @@ func (c *Coordinator) ResumeAgent(name string) error {
 	return nil
 }
 
-func (c *Coordinator) KillGoal(goalID string) error {
+func (c *Coordinator) ResumeGoal(goalID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resumeGoalLocked(goalID, "goal resumed")
+}
+
+func (c *Coordinator) resumeGoalLocked(goalID string, record string) error {
+	goal, ok := c.goals[goalID]
+	if !ok {
+		return errors.New("goal not found")
+	}
+	switch goal.Status {
+	case GoalStopped, GoalBlocked:
+	case GoalFailed:
+		if strings.TrimSpace(goal.Summary) != "killed by human" && !c.goalHasIncompletePlanLocked(goalID) {
+			return errors.New("goal cannot be resumed from failed state")
+		}
+	default:
+		return fmt.Errorf("goal is not resumable from state %q", goal.Status)
+	}
+	if !c.goalHasIncompletePlanLocked(goalID) {
+		return errors.New("goal has no incomplete plan to resume")
+	}
+
+	goal.Status = GoalActive
+	goal.Summary = ""
+	goal.CompletedAt = nil
+	c.currentGoalID = goalID
+	c.brainState.PendingHumanInput = nil
+	c.recordGoalLocked(goal, record)
+
+	incompletePhaseIndex := c.currentIncompletePhaseIndexLocked()
+	nextPhaseIndex := -1
+	if c.planExecutor != nil && c.brainState.CurrentPlan != nil && c.brainState.CurrentPlan.GoalID == goalID {
+		nextPhaseIndex = c.nextUnexecutedPhaseLocked()
+	}
+	var resumePhaseNumber int
+	if incompletePhaseIndex >= 0 && c.brainState.CurrentPlan != nil && incompletePhaseIndex < len(c.brainState.CurrentPlan.Phases) {
+		resumePhaseNumber = c.brainState.CurrentPlan.Phases[incompletePhaseIndex].Number
+	}
+
+	if resumePhaseNumber != 0 {
+		for _, task := range c.tasks {
+			if task.GoalID != goalID || task.PlanPhase != resumePhaseNumber {
+				continue
+			}
+			switch task.Status {
+			case TaskFailed, TaskCancelled:
+				if err := task.Retry(); err == nil {
+					task.ErrorOutput = ""
+					task.Result = ""
+					task.ReviewReason = ""
+					c.recordTaskLocked(task, "task re-queued by goal resume")
+				}
+			case TaskBlocked:
+				if err := task.MarkPending(); err == nil {
+					task.Result = ""
+					c.recordTaskLocked(task, "task unblocked by goal resume")
+				}
+			}
+			if state, ok := c.agentState[task.AssignedTo]; ok {
+				if agent, exists := c.agents[task.AssignedTo]; !exists || !agent.IsAvailable() {
+					state.Status = AgentOffline
+				} else if state.Status != AgentBusy {
+					state.Status = AgentIdle
+				}
+				if state.CurrentTask == task.ID && state.Status != AgentBusy {
+					state.CurrentTask = ""
+				}
+				state.LastActivity = time.Now().UTC()
+				c.recordAgentLocked(state, "agent reset by goal resume")
+			}
+		}
+	}
+
+	if c.planExecutor != nil && c.brainState.CurrentPlan != nil && c.brainState.CurrentPlan.GoalID == goalID {
+		if nextPhaseIndex >= 0 {
+			if err := c.planExecutor.ExecutePhase(c, nextPhaseIndex); err != nil {
+				return err
+			}
+			c.recordPlanLocked(c.brainState.CurrentPlan, "coordinator", "plan resumed")
+		}
+	}
+	c.signalDispatchLocked()
+	return nil
+}
+
+func (c *Coordinator) StopGoal(goalID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -481,10 +591,15 @@ func (c *Coordinator) KillGoal(goalID string) error {
 	if !ok {
 		return errors.New("goal not found")
 	}
-	now := time.Now().UTC()
-	goal.Status = GoalFailed
-	goal.Summary = "killed by human"
-	goal.CompletedAt = &now
+	if goal.Status == GoalCompleted {
+		return errors.New("completed goal cannot be stopped")
+	}
+	if goal.Status == GoalStopped {
+		return errors.New("goal is already stopped")
+	}
+	goal.Status = GoalStopped
+	goal.Summary = "stopped by human"
+	goal.CompletedAt = nil
 	if c.currentGoalID == goalID {
 		c.currentGoalID = ""
 		c.brainState.PendingHumanInput = nil
@@ -496,14 +611,111 @@ func (c *Coordinator) KillGoal(goalID string) error {
 		if task.Status == TaskCompleted || task.Status == TaskFailed || task.Status == TaskCancelled {
 			continue
 		}
-		_ = task.Cancel("killed with goal")
+		_ = task.Cancel("stopped with goal")
 		c.workspaceLocks.Unlock(task.ID)
 		if cancel := c.activeCancels[task.ID]; cancel != nil {
 			cancel()
+			delete(c.activeCancels, task.ID)
 		}
-		c.recordTaskLocked(task, "task cancelled with goal")
+		if state, ok := c.agentState[task.AssignedTo]; ok {
+			if agent, exists := c.agents[task.AssignedTo]; !exists || !agent.IsAvailable() {
+				state.Status = AgentOffline
+			} else {
+				state.Status = AgentIdle
+			}
+			if state.CurrentTask == task.ID {
+				state.CurrentTask = ""
+			}
+			state.LastActivity = time.Now().UTC()
+			c.recordAgentLocked(state, "agent idle after goal stop")
+		}
+		c.recordTaskLocked(task, "task cancelled with goal stop")
 	}
-	c.recordGoalLocked(goal, "goal killed")
+	c.recordGoalLocked(goal, "goal stopped")
+	return nil
+}
+
+func (c *Coordinator) DeleteGoal(goalID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	goal, ok := c.goals[goalID]
+	if !ok {
+		return errors.New("goal not found")
+	}
+	for _, task := range c.tasks {
+		if task.GoalID != goalID {
+			continue
+		}
+		c.workspaceLocks.Unlock(task.ID)
+		if cancel := c.activeCancels[task.ID]; cancel != nil {
+			cancel()
+			delete(c.activeCancels, task.ID)
+		}
+		if state, ok := c.agentState[task.AssignedTo]; ok && state.CurrentTask == task.ID {
+			if agent, exists := c.agents[task.AssignedTo]; !exists || !agent.IsAvailable() {
+				state.Status = AgentOffline
+			} else {
+				state.Status = AgentIdle
+			}
+			state.CurrentTask = ""
+			state.LastActivity = time.Now().UTC()
+		}
+		delete(c.tasks, task.ID)
+	}
+	filteredTaskOrder := make([]string, 0, len(c.taskOrder))
+	for _, taskID := range c.taskOrder {
+		if task := c.tasks[taskID]; task != nil {
+			filteredTaskOrder = append(filteredTaskOrder, taskID)
+		}
+	}
+	c.taskOrder = filteredTaskOrder
+
+	delete(c.goals, goalID)
+	filteredGoalOrder := make([]string, 0, len(c.goalOrder))
+	for _, id := range c.goalOrder {
+		if id != goalID {
+			filteredGoalOrder = append(filteredGoalOrder, id)
+		}
+	}
+	c.goalOrder = filteredGoalOrder
+
+	if c.currentGoalID == goalID {
+		c.currentGoalID = ""
+		c.brainState.PendingHumanInput = nil
+	}
+	if c.brainState.CurrentPlan != nil && c.brainState.CurrentPlan.GoalID == goalID {
+		c.brainState.CurrentPlan = nil
+		c.planExecutor = nil
+	}
+
+	filteredMessages := make([]*Message, 0, len(c.messages))
+	for _, msg := range c.messages {
+		if msg == nil {
+			continue
+		}
+		if msg.TaskID != "" {
+			if task := c.tasks[msg.TaskID]; task == nil {
+				continue
+			}
+		}
+		if msg.Metadata.Goal != nil && msg.Metadata.Goal.ID == goalID {
+			continue
+		}
+		if msg.Metadata.Plan != nil && msg.Metadata.Plan.GoalID == goalID {
+			continue
+		}
+		if msg.Metadata.Task != nil && msg.Metadata.Task.GoalID == goalID {
+			continue
+		}
+		filteredMessages = append(filteredMessages, msg)
+	}
+	c.messages = filteredMessages
+	if err := c.logStore.Rewrite(c.messages); err != nil {
+		return err
+	}
+	c.hub.Broadcast("snapshot", c.snapshotLocked())
+	_ = goal
 	return nil
 }
 
@@ -939,7 +1151,7 @@ func (c *Coordinator) handleDispatchResult(dr dispatchResult) {
 		filesChanged = dr.Result.FilesChanged
 	}
 
-	if hash, committedFiles, err := c.workspace.CommitTask(dr.AgentName, task.Title, task.ID); err == nil {
+	if hash, committedFiles, err := c.workspace.CommitTask(dr.AgentName, task.Title, task.ID, taskCommitPaths(task)); err == nil {
 		commitHash = hash
 		if len(committedFiles) > 0 {
 			filesChanged = committedFiles
@@ -1011,7 +1223,7 @@ func (c *Coordinator) handleDispatchResult(dr dispatchResult) {
 		if task.GoalID != "" {
 			if conflictContext := c.detectIntegrationConflictLocked(task, filesChanged); conflictContext != "" {
 				if goal := c.goals[task.GoalID]; goal != nil {
-					c.failGoalLocked(goal, conflictContext, "goal failed")
+					c.blockGoalLocked(goal, conflictContext, "goal blocked")
 				}
 			} else if err := c.advanceGoalWorkflowLocked(); err != nil {
 				if goal := c.goals[task.GoalID]; goal != nil {
@@ -1074,7 +1286,7 @@ func (c *Coordinator) completeQuiescentFileTasks() {
 			delete(c.activeCancels, task.ID)
 		}
 		c.workspaceLocks.Unlock(task.ID)
-		commitHash, filesChanged, _ := c.workspace.CommitTask(task.AssignedTo, task.Title, task.ID)
+		commitHash, filesChanged, _ := c.workspace.CommitTask(task.AssignedTo, task.Title, task.ID, taskCommitPaths(task))
 		if err := task.Complete(c.syntheticArtifactSummary(task), filesChanged, commitHash); err != nil {
 			continue
 		}
@@ -1173,6 +1385,17 @@ func (c *Coordinator) outputArtifactsReadyLocked(task *Task, invocation *Command
 	if task.StartedAt != nil {
 		taskStart = *task.StartedAt
 	}
+	hasFreshEvidence := false
+	if task.DiscussionFile != "" {
+		info, err := os.Stat(filepath.Join(c.workspace.Path(), filepath.FromSlash(task.DiscussionFile)))
+		if err != nil || info.IsDir() {
+			return false
+		}
+		if info.ModTime().Before(taskStart.Add(-time.Second)) {
+			return false
+		}
+		hasFreshEvidence = true
+	}
 	for _, relPath := range task.FilesTouched {
 		info, err := os.Stat(filepath.Join(c.workspace.Path(), filepath.FromSlash(relPath)))
 		if err != nil || info.IsDir() {
@@ -1181,17 +1404,22 @@ func (c *Coordinator) outputArtifactsReadyLocked(task *Task, invocation *Command
 		if info.ModTime().Before(taskStart.Add(-time.Second)) {
 			return false
 		}
+		hasFreshEvidence = true
 	}
-	return true
+	return hasFreshEvidence
 }
 
 func (c *Coordinator) syntheticArtifactSummary(task *Task) string {
 	if task == nil || len(task.FilesTouched) == 0 {
 		return "Expected workspace artifacts were produced; coordinator advanced after the worker stopped reporting progress."
 	}
+	details := append([]string(nil), task.FilesTouched...)
+	if task.DiscussionFile != "" {
+		details = append(details, task.DiscussionFile)
+	}
 	return fmt.Sprintf(
 		"Expected workspace artifacts were produced (%s); coordinator advanced after the worker stopped reporting progress.",
-		strings.Join(task.FilesTouched, ", "),
+		strings.Join(details, ", "),
 	)
 }
 
@@ -1928,10 +2156,15 @@ func (c *Coordinator) maxRetriesForAgentLocked(agentName string) int {
 }
 
 func (c *Coordinator) currentGoalLocked() *Goal {
-	if c.currentGoalID == "" {
-		return nil
+	if c.currentGoalID != "" {
+		return c.goals[c.currentGoalID]
 	}
-	return c.goals[c.currentGoalID]
+	if c.brainState.CurrentPlan != nil {
+		if goal := c.goals[c.brainState.CurrentPlan.GoalID]; goal != nil && c.goalHasIncompletePlanLocked(goal.ID) {
+			return goal
+		}
+	}
+	return nil
 }
 
 func (c *Coordinator) teamRosterLocked(withStatus bool) string {
@@ -2055,6 +2288,9 @@ func (c *Coordinator) mergeExistingPlanStateLocked(plan *Plan, executor *PlanExe
 	if plan == nil || executor == nil || c.brainState.CurrentPlan == nil {
 		return
 	}
+	if c.brainState.CurrentPlan.GoalID != "" && plan.GoalID != "" && c.brainState.CurrentPlan.GoalID != plan.GoalID {
+		return
+	}
 	known := map[string]string{}
 	for _, phase := range c.brainState.CurrentPlan.Phases {
 		for _, task := range phase.Tasks {
@@ -2092,6 +2328,21 @@ func (c *Coordinator) nextUnexecutedPhaseLocked() int {
 	}
 	for i := range c.brainState.CurrentPlan.Phases {
 		if !c.planExecutor.executedPhases[i] {
+			return i
+		}
+	}
+	return -1
+}
+
+func (c *Coordinator) currentIncompletePhaseIndexLocked() int {
+	if c.planExecutor == nil || c.brainState.CurrentPlan == nil {
+		return -1
+	}
+	for i := range c.brainState.CurrentPlan.Phases {
+		if !c.planExecutor.executedPhases[i] {
+			continue
+		}
+		if !c.phaseTasksCompleteLocked(i) {
 			return i
 		}
 	}
@@ -2306,15 +2557,7 @@ func (c *Coordinator) handleCompletedCrossCritiquePhaseLocked(goal *Goal, phase 
 	if len(critiqueTasks) == 0 {
 		return false, fmt.Errorf("review round %d completed without cross-critique tasks", round)
 	}
-	allPassed := true
-	failedSummaries := make([]string, 0, len(reviewTasks)+len(critiqueTasks))
-	for _, group := range [][]*Task{reviewTasks, critiqueTasks} {
-		groupPassed, groupFailures, _ := evaluateTaskVerdicts(group)
-		if !groupPassed {
-			allPassed = false
-			failedSummaries = append(failedSummaries, groupFailures...)
-		}
-	}
+	allPassed, failedSummaries, _ := evaluateTaskVerdicts(reviewTasks)
 	if allPassed {
 		c.completeCurrentGoalLocked(fmt.Sprintf("Specification %q passed adversarial review after %d round(s).", goal.Title, round))
 		return true, nil
@@ -2968,7 +3211,7 @@ func (c *Coordinator) failGoalLocked(goal *Goal, summary string, content string)
 	}
 	now := time.Now().UTC()
 	goal.Status = GoalFailed
-	goal.Summary = summary
+	goal.Summary = compactGoalSummary(summary)
 	goal.CompletedAt = &now
 	if c.currentGoalID == goal.ID {
 		c.currentGoalID = ""
@@ -2982,13 +3225,39 @@ func (c *Coordinator) blockGoalLocked(goal *Goal, summary string, content string
 		return
 	}
 	goal.Status = GoalBlocked
-	goal.Summary = summary
+	goal.Summary = compactGoalSummary(summary)
 	goal.CompletedAt = nil
 	c.recordGoalLocked(goal, firstNonEmpty(content, "goal blocked"))
 }
 
+func compactGoalSummary(summary string) string {
+	summary = strings.Join(strings.Fields(strings.TrimSpace(summary)), " ")
+	if len(summary) <= 320 {
+		return summary
+	}
+	return strings.TrimSpace(summary[:319]) + "…"
+}
+
+func taskCommitPaths(task *Task) []string {
+	if task == nil {
+		return nil
+	}
+	paths := append([]string{}, task.FilesTouched...)
+	if task.DiscussionFile != "" {
+		paths = append(paths, task.DiscussionFile)
+	}
+	return normalizeWorkspacePaths(paths)
+}
+
 func (c *Coordinator) detectIntegrationConflictLocked(task *Task, filesChanged []string) string {
 	if task == nil || task.GoalID == "" || len(filesChanged) == 0 {
+		return ""
+	}
+	if !c.shouldDetectIntegrationConflictForTaskLocked(task) {
+		return ""
+	}
+	relevantFiles := filterIntegrationConflictPaths(filesChanged)
+	if len(relevantFiles) == 0 {
 		return ""
 	}
 	parts := make([]string, 0)
@@ -2996,13 +3265,17 @@ func (c *Coordinator) detectIntegrationConflictLocked(task *Task, filesChanged [
 		if other == nil || other.ID == task.ID || other.GoalID != task.GoalID {
 			continue
 		}
+		if !c.shouldDetectIntegrationConflictForTaskLocked(other) {
+			continue
+		}
 		if other.PlanPhase != 0 && task.PlanPhase != 0 && other.PlanPhase != task.PlanPhase && other.Status != TaskRunning {
 			continue
 		}
-		if len(other.FilesChanged) == 0 {
+		otherFiles := filterIntegrationConflictPaths(other.FilesChanged)
+		if len(otherFiles) == 0 {
 			continue
 		}
-		matches := intersectStrings(filesChanged, other.FilesChanged)
+		matches := intersectStrings(relevantFiles, otherFiles)
 		if len(matches) == 0 {
 			continue
 		}
@@ -3013,6 +3286,52 @@ func (c *Coordinator) detectIntegrationConflictLocked(task *Task, filesChanged [
 	}
 	sort.Strings(parts)
 	return fmt.Sprintf("Potential integration conflict after task %q (%s). Overlaps detected: %s", task.Title, task.ID, strings.Join(parts, "; "))
+}
+
+func (c *Coordinator) shouldDetectIntegrationConflictForTaskLocked(task *Task) bool {
+	if task == nil {
+		return false
+	}
+	stage := c.workflowStageForTaskLocked(task)
+	switch stage {
+	case "preparing_spec", "consolidating_review", "amending_spec", "executing", "":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Coordinator) workflowStageForTaskLocked(task *Task) string {
+	if task == nil || c.brainState.CurrentPlan == nil || task.PlanPhase == 0 {
+		return ""
+	}
+	for _, phase := range c.brainState.CurrentPlan.Phases {
+		if phase.Number == task.PlanPhase {
+			return c.workflowStageForPhase(phase)
+		}
+	}
+	return ""
+}
+
+func filterIntegrationConflictPaths(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(paths))
+	for _, path := range paths {
+		trimmed := strings.TrimSpace(filepath.ToSlash(path))
+		if trimmed == "" {
+			continue
+		}
+		if trimmed == ".DS_Store" || strings.HasSuffix(trimmed, "/.DS_Store") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "discussions/") {
+			continue
+		}
+		filtered = append(filtered, trimmed)
+	}
+	return filtered
 }
 
 func intersectStrings(a, b []string) []string {

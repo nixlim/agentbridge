@@ -108,21 +108,20 @@ func (w *Workspace) CaptureChangedFiles() ([]string, error) {
 	return files, nil
 }
 
-func (w *Workspace) CommitTask(agentName, taskTitle, taskID string) (string, []string, error) {
+func (w *Workspace) CommitTask(agentName, taskTitle, taskID string, allowedFiles []string) (string, []string, error) {
 	if !w.isGitRepo() {
 		return "", nil, nil
 	}
-	files, err := w.CaptureChangedFiles()
-	if err != nil {
-		return "", nil, err
-	}
-	if len(files) == 0 {
+	pathspec := normalizeWorkspacePaths(allowedFiles)
+	if len(pathspec) == 0 {
 		return "", nil, nil
 	}
-	if _, err := w.runGit("add", "-A"); err != nil {
+	addArgs := append([]string{"add", "-A", "--"}, pathspec...)
+	if _, err := w.runGit(addArgs...); err != nil {
 		return "", nil, err
 	}
-	cachedFilesOutput, err := w.runGit("diff", "--cached", "--name-only")
+	diffArgs := append([]string{"diff", "--cached", "--name-only", "--"}, pathspec...)
+	cachedFilesOutput, err := w.runGit(diffArgs...)
 	if err != nil {
 		return "", nil, err
 	}
@@ -131,7 +130,8 @@ func (w *Workspace) CommitTask(agentName, taskTitle, taskID string) (string, []s
 		return "", nil, nil
 	}
 	message := fmt.Sprintf("[agentbridge] %s: %s (task:%s)", agentName, taskTitle, taskID)
-	if _, err := w.runGit("commit", "-m", message); err != nil {
+	commitArgs := append([]string{"commit", "-m", message, "--"}, cachedFiles...)
+	if _, err := w.runGit(commitArgs...); err != nil {
 		return "", nil, err
 	}
 	hash, err := w.runGit("rev-parse", "HEAD")
@@ -244,5 +244,23 @@ func splitNonEmptyLines(value string) []string {
 			out = append(out, part)
 		}
 	}
+	return out
+}
+
+func normalizeWorkspacePaths(paths []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = filepath.ToSlash(strings.TrimSpace(path))
+		if path == "" || path == "." {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	sort.Strings(out)
 	return out
 }

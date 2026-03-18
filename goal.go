@@ -7,6 +7,7 @@ type GoalStatus string
 const (
 	GoalPlanning  GoalStatus = "planning"
 	GoalActive    GoalStatus = "active"
+	GoalStopped   GoalStatus = "stopped"
 	GoalBlocked   GoalStatus = "blocked"
 	GoalCompleted GoalStatus = "completed"
 	GoalFailed    GoalStatus = "failed"
