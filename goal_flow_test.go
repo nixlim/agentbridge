@@ -64,6 +64,8 @@ func (a *scriptedAgent) ParseOutput(raw []byte) (*AgentResult, error) {
 
 func (a *scriptedAgent) IsAvailable() bool { return a.available }
 
+var specWritePathPattern = regexp.MustCompile(`(?:Write the (?:specification|consolidated specification) to this (?:workspace|new version) path|Write the consolidated specification to this new version path): (\S+)`)
+
 type hangingFileAgent struct {
 	name            string
 	filePath        string
@@ -83,7 +85,12 @@ func (a *hangingFileAgent) Execute(ctx context.Context, prompt string, workDir s
 		observer.ProcessStarted(os.Getpid())
 		observer.WaitStarted()
 	}
-	fullPath := filepath.Join(workDir, filepath.FromSlash(a.filePath))
+	// Determine the file path to write: prefer extracting from prompt, fall back to configured.
+	writePath := a.filePath
+	if matches := specWritePathPattern.FindStringSubmatch(prompt); len(matches) == 2 {
+		writePath = matches[1]
+	}
+	fullPath := filepath.Join(workDir, filepath.FromSlash(writePath))
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 		return nil, err
 	}
@@ -961,7 +968,7 @@ func TestReviewPromptIncludesDiscussionReferences(t *testing.T) {
 	if !strings.Contains(prompt, prepTask.DiscussionFile) {
 		t.Fatalf("expected prompt to reference dependency discussion file %q, got %q", prepTask.DiscussionFile, prompt)
 	}
-	if !strings.Contains(prompt, "specs/b5-spec-spec.md") {
+	if !strings.Contains(prompt, "specs/b5-spec-spec-v0.md") {
 		t.Fatalf("expected prompt to reference spec file, got %q", prompt)
 	}
 	if !strings.Contains(prompt, reviewTask.DiscussionFile) {
@@ -1318,7 +1325,7 @@ func TestSpecWorkflowAutoCompletesQuiescentArtifactTask(t *testing.T) {
 	defer hub.Shutdown()
 
 	coordinator := NewCoordinator(cfg, map[string]Agent{
-		"spec-1":        &hangingFileAgent{name: "spec-1", filePath: "specs/b2-spec-spec.md", content: "# spec", discussionBody: "prepared spec", writeDiscussion: true, available: true},
+		"spec-1":        &hangingFileAgent{name: "spec-1", filePath: "specs/b2-spec-spec-v0.md", content: "# spec", discussionBody: "prepared spec", writeDiscussion: true, available: true},
 		"review-codex":  &scriptedAgent{name: "review-codex", responses: []string{"VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent."}, delay: 20 * time.Millisecond, available: true},
 		"review-claude": &scriptedAgent{name: "review-claude", responses: []string{"VERDICT: PASS\n\nThe spec has no unaddressed ambiguities or unanswered questions for an AI coding agent."}, delay: 20 * time.Millisecond, available: true},
 	}, nil, workspace, store, hub)

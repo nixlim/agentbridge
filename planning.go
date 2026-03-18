@@ -34,6 +34,7 @@ type WorkflowState struct {
 	MaxReviewRounds       int    `json:"max_review_rounds,omitempty"`
 	StageTaskCompleted    int    `json:"stage_task_completed,omitempty"`
 	StageTaskTotal        int    `json:"stage_task_total,omitempty"`
+	SpecVersion           int    `json:"spec_version,omitempty"`
 	LastError             string `json:"last_error,omitempty"`
 }
 

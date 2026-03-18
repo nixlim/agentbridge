@@ -2440,6 +2440,10 @@ func (c *Coordinator) advanceGoalWorkflowLocked() error {
 	if goal.Status == GoalBlocked || goal.Status == GoalFailed || goal.Status == GoalCompleted {
 		return nil
 	}
+	if reason, tripped := c.checkCircuitBreakersLocked(goal); tripped {
+		c.blockGoalLocked(goal, reason, reason)
+		return nil
+	}
 
 	phaseIndex := c.planExecutor.currentPhase
 	if phaseIndex >= 0 && phaseIndex < len(c.brainState.CurrentPlan.Phases) {
@@ -2497,6 +2501,7 @@ func (c *Coordinator) workflowStateLocked() WorkflowState {
 	state.ReviewRound = c.activeReviewRoundLocked(phaseIndex)
 	state.CompletedReviewRounds = c.completedReviewRoundsLocked()
 	state.MaxReviewRounds = c.goalReviewRoundsLocked(goal)
+	state.SpecVersion = state.CompletedReviewRounds
 	state.StageTaskCompleted, state.StageTaskTotal = c.phaseTaskProgressLocked(phase)
 	if goal.Summary != "" && (goal.Status == GoalBlocked || goal.Status == GoalFailed) {
 		state.LastError = goal.Summary
@@ -2605,13 +2610,21 @@ func (c *Coordinator) handleCompletedParallelReviewPhaseLocked(goal *Goal, phase
 		return false, fmt.Errorf("review phase %q completed without a task", phase.Title)
 	}
 	allPassed, failedSummaries, reviewTaskIDs := evaluateTaskVerdicts(reviewTasks)
+	round := max(1, c.extractReviewRound(phase.Title))
+
+	// Parse, merge, and persist structured findings from this review round.
+	c.mergeReviewFindingsLocked(goal, reviewTasks, round)
+
 	if allPassed {
-		c.completeCurrentGoalLocked(fmt.Sprintf("Specification %q passed adversarial review after %d round(s).", goal.Title, max(1, c.extractReviewRound(phase.Title))))
+		c.completeCurrentGoalLocked(fmt.Sprintf("Specification %q passed adversarial review after %d round(s).", goal.Title, round))
 		return true, nil
 	}
-	round := max(1, c.extractReviewRound(phase.Title))
 	if round >= c.goalReviewRoundsLocked(goal) {
 		c.blockGoalLocked(goal, fmt.Sprintf("specification review did not pass after %d rounds: %s", round, strings.TrimSpace(strings.Join(failedSummaries, "\n\n---\n\n"))), "goal blocked")
+		return true, nil
+	}
+	if reason, tripped := c.checkCircuitBreakersLocked(goal); tripped {
+		c.blockGoalLocked(goal, reason, reason)
 		return true, nil
 	}
 	if err := c.appendSpecRevisionRoundLocked(goal, round+1, reviewTaskIDs); err != nil {
@@ -2641,12 +2654,20 @@ func (c *Coordinator) handleCompletedCrossCritiquePhaseLocked(goal *Goal, phase 
 		return false, fmt.Errorf("review round %d completed without cross-critique tasks", round)
 	}
 	allPassed, failedSummaries, _ := evaluateTaskVerdicts(reviewTasks)
+
+	// Parse, merge, and persist structured findings from this review round.
+	c.mergeReviewFindingsLocked(goal, reviewTasks, round)
+
 	if allPassed {
 		c.completeCurrentGoalLocked(fmt.Sprintf("Specification %q passed adversarial review after %d round(s).", goal.Title, round))
 		return true, nil
 	}
 	if round >= c.goalReviewRoundsLocked(goal) {
 		c.blockGoalLocked(goal, fmt.Sprintf("specification review did not pass after %d rounds: %s", round, strings.TrimSpace(strings.Join(failedSummaries, "\n\n---\n\n"))), "goal blocked")
+		return true, nil
+	}
+	if reason, tripped := c.checkCircuitBreakersLocked(goal); tripped {
+		c.blockGoalLocked(goal, reason, reason)
 		return true, nil
 	}
 	if err := c.appendSpecCrossCritiqueRoundLocked(goal, round+1, phase); err != nil {
@@ -2672,6 +2693,9 @@ func (c *Coordinator) appendSpecRevisionRoundLocked(goal *Goal, round int, revie
 		return errors.New("spec workflow requires one spec_creator and two reviewers")
 	}
 	specPath := c.specOutputPath(goal)
+	slug := c.goalSlug(goal)
+	consolidationRound := round - 1
+	consolidationOutputPath := specVersionPath(slug, consolidationRound)
 	baseTitle := c.normalizedGoalTitle(goal)
 	consolidateTempID := fmt.Sprintf("consolidate-spec-r%d", round-1)
 	currentPhaseCount := len(c.brainState.CurrentPlan.Phases)
@@ -2704,7 +2728,7 @@ func (c *Coordinator) appendSpecRevisionRoundLocked(goal *Goal, round int, revie
 				AssignTo:     primary,
 				DependsOn:    dependsOn,
 				Priority:     1,
-				FilesTouched: []string{specPath},
+				FilesTouched: []string{consolidationOutputPath},
 			}},
 		},
 		Phase{
@@ -2981,6 +3005,8 @@ func (c *Coordinator) chooseReviewerAgentsLocked(primary string, count int) []st
 func (c *Coordinator) buildSpecWorkflowPlanLocked(goal *Goal, primary string, reviewers []string) *Plan {
 	baseTitle := c.normalizedGoalTitle(goal)
 	specPath := c.specOutputPath(goal)
+	slug := c.goalSlug(goal)
+	v0Path := specVersionPath(slug, 0)
 	reviewTasks := make([]PlannedTask, 0, len(reviewers))
 	for i, reviewer := range reviewers {
 		reviewTasks = append(reviewTasks, PlannedTask{
@@ -3005,7 +3031,7 @@ func (c *Coordinator) buildSpecWorkflowPlanLocked(goal *Goal, primary string, re
 					Description:  c.buildSpecPreparationTaskDescription(goal, specPath),
 					AssignTo:     primary,
 					Priority:     1,
-					FilesTouched: []string{specPath},
+					FilesTouched: []string{v0Path},
 				}},
 			},
 			{
@@ -3021,6 +3047,8 @@ func (c *Coordinator) buildSpecWorkflowPlanLocked(goal *Goal, primary string, re
 func (c *Coordinator) buildSpecCrossCritiqueWorkflowPlanLocked(goal *Goal, primary string, reviewers []string) *Plan {
 	baseTitle := c.normalizedGoalTitle(goal)
 	specPath := c.specOutputPath(goal)
+	slug := c.goalSlug(goal)
+	v0Path := specVersionPath(slug, 0)
 	reviewPhases, critiquePhase, consolidatePhase := c.buildCrossCritiqueRoundPhasesLocked(goal, primary, reviewers, specPath, baseTitle, 1, []string{"prepare-spec-r1"})
 	reviewPhases.Number = 2
 	critiquePhase.Number = 3
@@ -3038,7 +3066,7 @@ func (c *Coordinator) buildSpecCrossCritiqueWorkflowPlanLocked(goal *Goal, prima
 					Description:  c.buildSpecPreparationTaskDescription(goal, specPath),
 					AssignTo:     primary,
 					Priority:     1,
-					FilesTouched: []string{specPath},
+					FilesTouched: []string{v0Path},
 				}},
 			},
 			reviewPhases,
@@ -3049,6 +3077,9 @@ func (c *Coordinator) buildSpecCrossCritiqueWorkflowPlanLocked(goal *Goal, prima
 }
 
 func (c *Coordinator) buildCrossCritiqueRoundPhasesLocked(goal *Goal, primary string, reviewers []string, specPath string, baseTitle string, round int, reviewDependsOn []string) (Phase, Phase, Phase) {
+	slug := c.goalSlug(goal)
+	consolidationOutputPath := specVersionPath(slug, round)
+
 	reviewTasks := make([]PlannedTask, 0, len(reviewers))
 	reviewTempIDs := make([]string, 0, len(reviewers))
 	for i, reviewer := range reviewers {
@@ -3104,7 +3135,7 @@ func (c *Coordinator) buildCrossCritiqueRoundPhasesLocked(goal *Goal, primary st
 				AssignTo:     primary,
 				DependsOn:    consolidateDependsOn,
 				Priority:     1,
-				FilesTouched: []string{specPath},
+				FilesTouched: []string{consolidationOutputPath},
 			}},
 		}
 }
@@ -3184,7 +3215,7 @@ func (c *Coordinator) buildReviewTaskDescription(goal *Goal) string {
 	}, "\n\n"))
 }
 
-func (c *Coordinator) specOutputPath(goal *Goal) string {
+func (c *Coordinator) goalSlug(goal *Goal) string {
 	slug := strings.ToLower(strings.TrimSpace(goal.Title))
 	if slug == "" {
 		slug = "spec"
@@ -3205,14 +3236,24 @@ func (c *Coordinator) specOutputPath(goal *Goal) string {
 	if slug == "" {
 		slug = "spec"
 	}
-	return filepath.ToSlash(filepath.Join(defaultSpecOutputDir, slug+"-spec.md"))
+	return slug
+}
+
+func (c *Coordinator) specOutputPath(goal *Goal) string {
+	return filepath.ToSlash(filepath.Join(defaultSpecOutputDir, c.goalSlug(goal)+"-spec.md"))
+}
+
+func specVersionPath(goalSlug string, version int) string {
+	return filepath.ToSlash(filepath.Join(defaultSpecOutputDir, fmt.Sprintf("%s-spec-v%d.md", goalSlug, version)))
 }
 
 func (c *Coordinator) buildSpecPreparationTaskDescription(goal *Goal, specPath string) string {
+	slug := c.goalSlug(goal)
+	v0Path := specVersionPath(slug, 0)
 	return strings.TrimSpace(strings.Join([]string{
 		"Prepare an implementation-ready specification from the supplied technical materials.",
 		fmt.Sprintf("Use the plan-spec skill located at: %s", specPrepSkillPath()),
-		fmt.Sprintf("Write the specification to this workspace path: %s", specPath),
+		fmt.Sprintf("Write the specification to this workspace path: %s", v0Path),
 		"Create the directory if needed. The file must be markdown.",
 		"Use the technical documents and constraints in the goal details as source inputs.",
 		"Your output must leave the spec ready for adversarial review by another agent.",
@@ -3224,26 +3265,55 @@ func (c *Coordinator) buildSpecPreparationTaskDescription(goal *Goal, specPath s
 }
 
 func (c *Coordinator) buildSpecReviewTaskDescription(goal *Goal, specPath string, round int, reviewerIndex int, reviewerCount int) string {
+	// Determine the latest spec version: for round 1, reviewers read v0 (the initial preparation).
+	// For subsequent rounds, the previous consolidation wrote v{round-1}.
+	slug := c.goalSlug(goal)
+	latestVersion := round - 1
+	reviewSpecPath := specVersionPath(slug, latestVersion)
+
+	// Reviewer focus specialization: assign different review lenses to each reviewer.
+	var lensLine string
+	switch reviewerIndex {
+	case 1:
+		lensLine = "Your assigned review lenses for this round: CLARITY, CORRECTNESS, SECURITY, COMPLETENESS."
+	case 2:
+		lensLine = "Your assigned review lenses for this round: CONSISTENCY, FEASIBILITY, OPERABILITY, COMPLEXITY."
+	default:
+		lensLine = "Your assigned review lenses for this round: CLARITY, CORRECTNESS, SECURITY, COMPLETENESS."
+	}
+
 	return strings.TrimSpace(strings.Join([]string{
 		fmt.Sprintf("Perform adversarial review round %d on the prepared specification.", round),
 		fmt.Sprintf("You are reviewer %d of %d parallel reviewers for this round.", reviewerIndex, reviewerCount),
 		fmt.Sprintf("Use the grill-spec skill located at: %s", specReviewSkillPath()),
-		fmt.Sprintf("Review this workspace file only: %s", specPath),
+		fmt.Sprintf("Review this workspace file only: %s", reviewSpecPath),
+		lensLine,
+		"While you should note any issue you find, prioritize findings in your assigned lenses.",
 		"Assume the spec will be handed to an AI coding agent. Your job is to find every ambiguity, hidden assumption, missing edge case, missing acceptance criterion, and any unanswered engineering question.",
 		"Return a strict review report starting with exactly one of these first lines:",
 		"VERDICT: PASS",
 		"VERDICT: FAIL",
 		"If the verdict is FAIL, include sections named BLOCKERS, AMBIGUITIES, ASSUMPTIONS, QUESTIONS, and OPERABILITY GAPS.",
 		"If the verdict is PASS, explicitly state that the spec has no unaddressed ambiguities or unanswered questions for an AI coding agent.",
+		"",
+		"After your verdict and sections, include a structured findings block for automated tracking.",
+		"Wrap it in a JSON code fence exactly like this:",
+		"```json",
+		`{"findings":[{"severity":"CRITICAL|MAJOR|MINOR|OBSERVATION","affected_section":"section name","description":"what is wrong","recommendation":"how to fix"}]}`,
+		"```",
+		"Every issue mentioned in your BLOCKERS/AMBIGUITIES/ASSUMPTIONS sections must appear as a finding.",
 		fmt.Sprintf("Goal title: %s", goal.Title),
 	}, "\n\n"))
 }
 
 func (c *Coordinator) buildSpecCritiqueTaskDescription(goal *Goal, specPath string, round int, reviewerIndex int, peerIndex int, reviewerCount int) string {
+	slug := c.goalSlug(goal)
+	latestVersion := round - 1
+	critiqueSpecPath := specVersionPath(slug, latestVersion)
 	return strings.TrimSpace(strings.Join([]string{
 		fmt.Sprintf("Critique the peer review from adversarial review round %d.", round),
 		fmt.Sprintf("You are reviewer %d of %d and you are critiquing reviewer %d's report.", reviewerIndex, reviewerCount, peerIndex),
-		fmt.Sprintf("The specification under review is still: %s", specPath),
+		fmt.Sprintf("The specification under review is still: %s", critiqueSpecPath),
 		"Use the dependency context from both adversarial review outputs, but focus on the other reviewer's reasoning, completeness, and whether they missed issues or raised weak objections.",
 		"Return a strict critique report. This is not a pass/fail step.",
 		"Use these exact section headings in this order:",
@@ -3263,12 +3333,22 @@ func (c *Coordinator) buildSpecCritiqueTaskDescription(goal *Goal, specPath stri
 }
 
 func (c *Coordinator) buildSpecConsolidationTaskDescription(goal *Goal, specPath string, round int, reviewerCount int) string {
+	slug := c.goalSlug(goal)
+	inputVersion := round - 1
+	outputVersion := round
+	inputPath := specVersionPath(slug, inputVersion)
+	outputPath := specVersionPath(slug, outputVersion)
+	findingsPath := fmt.Sprintf("discussions/%s/round-%02d/merged-findings-round-%02d.json", slug, round, round)
 	return strings.TrimSpace(strings.Join([]string{
 		fmt.Sprintf("Consolidate and amend the specification after adversarial review round %d.", round),
 		fmt.Sprintf("Use the plan-spec skill located at: %s", specPrepSkillPath()),
-		fmt.Sprintf("Update this workspace file in place: %s", specPath),
+		fmt.Sprintf("Read the current specification from: %s", inputPath),
+		fmt.Sprintf("Write the consolidated specification to this new version path: %s", outputPath),
+		"Create the directory if needed. The file must be markdown.",
 		fmt.Sprintf("Use the dependency context from %d adversarial reviewer outputs as the authoritative review input.", reviewerCount),
-		"For each reviewer point, explicitly assess it, state whether you agree or disagree, and give a brief rationale.",
+		fmt.Sprintf("A merged findings ledger with deduplicated, ID-tagged findings is available at: %s", findingsPath),
+		"Reference findings by their ID (e.g. CRIT-001, MAJ-002) in your consolidation summary.",
+		"For each finding, state whether you: INCORPORATED it, DISMISSED it (with reason: DUPLICATE, OUT_OF_SCOPE, CONTRADICTED_BY_REQUIREMENT, or REVIEWER_ERROR), or DEFERRED it.",
 		"Incorporate every accepted change into the specification.",
 		"If you disagree with a reviewer point, record the disagreement and rationale clearly in your summary so the next round can inspect it.",
 		"If any item cannot be fully resolved from the source materials, document it explicitly in the spec and in your summary.",
@@ -3280,12 +3360,22 @@ func (c *Coordinator) buildSpecConsolidationTaskDescription(goal *Goal, specPath
 }
 
 func (c *Coordinator) buildSpecCrossCritiqueConsolidationTaskDescription(goal *Goal, specPath string, round int, reviewerCount int) string {
+	slug := c.goalSlug(goal)
+	inputVersion := round - 1
+	outputVersion := round
+	inputPath := specVersionPath(slug, inputVersion)
+	outputPath := specVersionPath(slug, outputVersion)
+	findingsPath := fmt.Sprintf("discussions/%s/round-%02d/merged-findings-round-%02d.json", slug, round, round)
 	return strings.TrimSpace(strings.Join([]string{
 		fmt.Sprintf("Consolidate and amend the specification after adversarial review round %d and the reviewer cross-critiques.", round),
 		fmt.Sprintf("Use the plan-spec skill located at: %s", specPrepSkillPath()),
-		fmt.Sprintf("Update this workspace file in place: %s", specPath),
+		fmt.Sprintf("Read the current specification from: %s", inputPath),
+		fmt.Sprintf("Write the consolidated specification to this new version path: %s", outputPath),
+		"Create the directory if needed. The file must be markdown.",
 		fmt.Sprintf("Use the dependency context from %d reviewer reports and %d reviewer-to-reviewer critiques as authoritative input.", reviewerCount, reviewerCount),
-		"For each reviewer finding and each critique point, explicitly assess it, say whether you agree or disagree, and give a brief rationale.",
+		fmt.Sprintf("A merged findings ledger with deduplicated, ID-tagged findings is available at: %s", findingsPath),
+		"Reference findings by their ID (e.g. CRIT-001, MAJ-002) in your consolidation summary.",
+		"For each finding, state whether you: INCORPORATED it, DISMISSED it (with reason: DUPLICATE, OUT_OF_SCOPE, CONTRADICTED_BY_REQUIREMENT, or REVIEWER_ERROR), or DEFERRED it.",
 		"Incorporate every accepted change into the specification.",
 		"If you disagree with a reviewer or critique point, record the disagreement and rationale clearly in your summary so the next round can inspect it.",
 		"If any item cannot be fully resolved from the source materials, document it explicitly in the spec and in your summary.",
@@ -3294,6 +3384,81 @@ func (c *Coordinator) buildSpecCrossCritiqueConsolidationTaskDescription(goal *G
 		"Goal details:",
 		goal.Description,
 	}, "\n\n"))
+}
+
+func (c *Coordinator) checkCircuitBreakersLocked(goal *Goal) (string, bool) {
+	if goal == nil {
+		return "", false
+	}
+	// Wall clock check.
+	if limit := c.config.Workflow.MaxWallClockMinutes; limit > 0 {
+		elapsed := time.Since(goal.CreatedAt)
+		if elapsed > time.Duration(limit)*time.Minute {
+			return fmt.Sprintf("circuit breaker: wall clock exceeded %d minutes (elapsed %s)", limit, elapsed.Truncate(time.Second)), true
+		}
+	}
+	// Token cost check: sum all agent-state tokens for tasks belonging to this goal.
+	if limit := c.config.Workflow.MaxCostTokens; limit > 0 {
+		totalTokens := 0
+		goalTaskAgents := map[string]bool{}
+		for _, taskID := range c.taskOrder {
+			task := c.tasks[taskID]
+			if task != nil && task.GoalID == goal.ID && task.AssignedTo != "" {
+				goalTaskAgents[task.AssignedTo] = true
+			}
+		}
+		for agentName := range goalTaskAgents {
+			if state := c.agentState[agentName]; state != nil {
+				totalTokens += state.TotalTokensIn + state.TotalTokensOut
+			}
+		}
+		if totalTokens > limit {
+			return fmt.Sprintf("circuit breaker: total tokens %d exceeded limit %d", totalTokens, limit), true
+		}
+	}
+	return "", false
+}
+
+// mergeReviewFindingsLocked parses structured findings from reviewer task
+// results, deduplicates them, assigns stable IDs, writes the merged ledger
+// to the workspace, and returns the formatted text for consolidation prompts.
+func (c *Coordinator) mergeReviewFindingsLocked(goal *Goal, reviewTasks []*Task, round int) string {
+	slug := c.goalSlug(goal)
+
+	// Load prior round ledger so we can merge across rounds.
+	var existing []*Finding
+	if round > 1 {
+		if prev, err := ReadFindingsLedger(c.workspace, slug, round-1); err == nil && prev != nil {
+			existing = prev.Findings
+		}
+	}
+
+	// Parse structured findings from each reviewer's output.
+	var roundFindings []*Finding
+	for _, task := range reviewTasks {
+		if task == nil || task.Result == "" {
+			continue
+		}
+		source := task.AssignedTo
+		parsed := ParseStructuredFindings(task.Result, source, round)
+		roundFindings = append(roundFindings, parsed...)
+	}
+
+	// Merge with existing findings and assign stable IDs.
+	merged := MergeFindings(existing, roundFindings)
+
+	// Write the ledger to the workspace.
+	ledger := &FindingsLedger{
+		GoalID:   goal.ID,
+		Round:    round,
+		Findings: merged,
+	}
+	_ = WriteFindingsLedger(c.workspace, slug, round, ledger)
+
+	if len(merged) == 0 {
+		return ""
+	}
+	return FormatFindingsForPrompt(merged)
 }
 
 func (c *Coordinator) failGoalLocked(goal *Goal, summary string, content string) {

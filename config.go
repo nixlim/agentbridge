@@ -36,6 +36,8 @@ type WorkspaceConfig struct {
 type WorkflowConfig struct {
 	DefaultReviewRounds int    `yaml:"default_review_rounds" json:"default_review_rounds"`
 	DefaultRecipe       string `yaml:"default_recipe" json:"default_recipe"`
+	MaxWallClockMinutes int    `yaml:"max_wall_clock_minutes" json:"max_wall_clock_minutes"`
+	MaxCostTokens       int    `yaml:"max_cost_tokens" json:"max_cost_tokens"`
 }
 
 // BrainConfig is legacy naming kept for config file compatibility (brain: section in YAML).
