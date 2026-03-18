@@ -7,7 +7,7 @@
   <link rel="icon" href="data:,">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -21,7 +21,7 @@
         <span id="connection-dot" class="topbar-dot"></span>
         <span id="connection-label">disconnected</span>
       </div>
-      <div class="topbar-spacer"></div>
+      <div class="topbar-divider"></div>
       <div class="topbar-item">
         <label>Workflow</label>
         <span id="brain-provider-label">deterministic</span>
@@ -30,6 +30,7 @@
         <label>Workspace</label>
         <span id="workspace-path">unknown</span>
       </div>
+      <div class="topbar-spacer"></div>
       <button id="theme-toggle" type="button" class="theme-toggle">Light</button>
     </div>
 
@@ -67,12 +68,12 @@
     </div>
 
     <nav class="tabbar">
-      <button class="tab active" data-tab="overview">Overview</button>
-      <button class="tab" data-tab="plan">Plan</button>
-      <button class="tab" data-tab="tasks">Tasks <span id="tab-tasks-count" class="tab-count"></span></button>
-      <button class="tab" data-tab="messages">Messages</button>
-      <button class="tab" data-tab="workspace">Workspace</button>
-      <button class="tab" data-tab="controls">Launch</button>
+      <button class="tab active" data-tab="overview">&#x25C9; Overview</button>
+      <button class="tab" data-tab="plan">&#x2630; Plan</button>
+      <button class="tab" data-tab="tasks">&#x26A1; Tasks <span id="tab-tasks-count" class="tab-count"></span></button>
+      <button class="tab" data-tab="messages">&#x25C6; Messages</button>
+      <button class="tab" data-tab="workspace">&#x229E; Workspace</button>
+      <button class="tab" data-tab="controls">&#x25B6; Launch</button>
     </nav>
 
     <div class="tab-panels">
@@ -89,7 +90,7 @@
           <div class="brain-grid">
             <div class="brain-output">
               <div class="brain-meta">
-                <span id="brain-invocations" class="muted" style="font-size:11px">deterministic workflow</span>
+                <span id="brain-invocations" class="muted" style="font-size:12px">deterministic workflow</span>
               </div>
               <p id="workflow-status" class="brain-status-line">No active workflow state.</p>
               <p id="brain-process" class="brain-status-line">No active worker process telemetry yet.</p>
@@ -139,7 +140,7 @@
             <span class="section-title">Spec Version Diff</span>
             <div class="section-actions">
               <select id="diff-version-a" class="topbar-select"></select>
-              <span style="color:var(--text-muted);font-size:11px">vs</span>
+              <span style="color:var(--text-muted);font-size:12px">vs</span>
               <select id="diff-version-b" class="topbar-select"></select>
               <button id="load-diff" type="button" class="btn-sm">Load Diff</button>
             </div>

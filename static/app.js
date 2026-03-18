@@ -259,16 +259,16 @@ function renderWorkflowStepper() {
 
   const currentStage = state.workflow.stage || "";
 
+  const stageIdx = stages.indexOf(currentStage);
   stages.forEach((stageKey, idx) => {
     if (idx > 0) {
-      const arrow = document.createElement("span");
-      arrow.className = "stepper-arrow";
-      arrow.textContent = "\u2192";
-      refs.workflowStepper.appendChild(arrow);
+      const connector = document.createElement("span");
+      connector.className = "stepper-connector";
+      if (stageIdx >= 0 && idx <= stageIdx) connector.classList.add("completed");
+      refs.workflowStepper.appendChild(connector);
     }
     const step = document.createElement("span");
     step.className = "stepper-step";
-    const stageIdx = stages.indexOf(currentStage);
     if (stageKey === currentStage) {
       step.classList.add("active");
     } else if (stageIdx >= 0 && idx < stageIdx) {
@@ -1362,9 +1362,16 @@ function renderTaskCard(task) {
   const header = document.createElement("div");
   header.className = "card-header";
   const titleWrap = document.createElement("div");
+  const titleRow = document.createElement("div");
+  titleRow.style.display = "flex";
+  titleRow.style.alignItems = "center";
+  titleRow.style.gap = "8px";
+  const priorityDot = document.createElement("span");
+  priorityDot.className = `priority-dot p${task.priority || 3}`;
   const title = document.createElement("span");
   title.className = "card-title";
   title.textContent = task.title;
+  titleRow.append(priorityDot, title);
 
   // Verdict badge in header
   const verdict = extractVerdict(task.result);
@@ -1380,7 +1387,7 @@ function renderTaskCard(task) {
   );
   if (verdict) tags.appendChild(verdictBadge(verdict));
 
-  titleWrap.append(title, tags);
+  titleWrap.append(titleRow, tags);
   const timer = document.createElement("span");
   timer.className = "card-meta";
   timer.style.marginTop = "0";
