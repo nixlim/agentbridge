@@ -49,6 +49,10 @@ func (e *CommandExecutionError) Unwrap() error {
 }
 
 func executeAdapterCommand(ctx context.Context, config AgentConfig, workspacePath, workDir string, args []string, parse func([]byte) (*AgentResult, error)) (*AgentResult, error) {
+	return executeAdapterCommandWithStdin(ctx, config, workspacePath, workDir, args, "", parse)
+}
+
+func executeAdapterCommandWithStdin(ctx context.Context, config AgentConfig, workspacePath, workDir string, args []string, stdinContent string, parse func([]byte) (*AgentResult, error)) (*AgentResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(config.TimeoutSeconds)*time.Second)
 	defer cancel()
 
@@ -56,6 +60,9 @@ func executeAdapterCommand(ctx context.Context, config AgentConfig, workspacePat
 	cmd.Dir = chooseWorkDir(workDir, config.WorkingDir, workspacePath)
 	cmd.Env = buildAdapterEnv(config.Env, workspacePath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if stdinContent != "" {
+		cmd.Stdin = strings.NewReader(stdinContent)
+	}
 	observer := commandTelemetryObserverFromContext(ctx)
 
 	var stdout, stderr bytes.Buffer

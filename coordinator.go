@@ -1767,7 +1767,7 @@ func (c *Coordinator) buildAgentPromptLocked(task *Task, agent *AgentState, forw
 	builder.WriteString("- Do not create commits that include files outside the shared workspace.\n")
 	builder.WriteString("- Never run git push.\n\n")
 	builder.WriteString("Files in workspace:\n")
-	builder.WriteString(c.workspaceTreeLocked())
+	builder.WriteString(c.workspaceTreeForTaskLocked(task))
 	builder.WriteString("\n\n")
 	if task != nil && task.DiscussionFile != "" {
 		builder.WriteString(fmt.Sprintf("You must write your round/phase discussion record to this workspace file: %s\n", task.DiscussionFile))
@@ -2261,16 +2261,79 @@ func (c *Coordinator) pruneBrainHistoryLocked() {
 	c.brainState.ConversationHistory = keep
 }
 
-func (c *Coordinator) workspaceTreeLocked() string {
+// workspaceTreeForTaskLocked returns a workspace file listing scoped to the
+// current task. Discussion files from prior rounds are summarized (count per
+// round directory) rather than listed individually, which keeps prompts
+// compact as the workspace grows across many review rounds.
+func (c *Coordinator) workspaceTreeForTaskLocked(task *Task) string {
 	files, err := c.workspace.ListFiles()
 	if err != nil || len(files) == 0 {
 		return "(workspace is empty)"
 	}
-	if len(files) > 200 {
-		files = files[:200]
-		files = append(files, "... (truncated)")
+
+	// Determine which discussion round directories are relevant to this task.
+	relevantRoundDirs := map[string]bool{}
+	if task != nil {
+		if task.DiscussionFile != "" {
+			relevantRoundDirs[discussionRoundDir(task.DiscussionFile)] = true
+		}
+		for _, depID := range task.DependsOn {
+			if dep := c.tasks[depID]; dep != nil && dep.DiscussionFile != "" {
+				relevantRoundDirs[discussionRoundDir(dep.DiscussionFile)] = true
+			}
+		}
 	}
-	return strings.Join(files, "\n")
+
+	var listed []string
+	summarized := map[string]int{} // round dir → count
+	for _, f := range files {
+		roundDir := discussionRoundDir(f)
+		if roundDir == "" || relevantRoundDirs[roundDir] {
+			listed = append(listed, f)
+		} else {
+			summarized[roundDir]++
+		}
+	}
+
+	if len(summarized) > 0 {
+		dirs := make([]string, 0, len(summarized))
+		for dir := range summarized {
+			dirs = append(dirs, dir)
+		}
+		sort.Strings(dirs)
+		for _, dir := range dirs {
+			listed = append(listed, fmt.Sprintf("%s/ (%d files from earlier rounds)", dir, summarized[dir]))
+		}
+	}
+
+	if len(listed) > 100 {
+		listed = listed[:100]
+		listed = append(listed, "... (truncated)")
+	}
+	return strings.Join(listed, "\n")
+}
+
+// workspaceTreeLocked returns the full workspace file listing (legacy helper).
+func (c *Coordinator) workspaceTreeLocked() string {
+	return c.workspaceTreeForTaskLocked(nil)
+}
+
+// discussionRoundDir extracts the round directory prefix from a discussion
+// file path, e.g. "discussions/foo/round-02/adversarial-review-round-2"
+// returns "discussions/foo/round-02". Returns "" for non-discussion paths.
+func discussionRoundDir(path string) string {
+	if !strings.HasPrefix(path, "discussions/") {
+		return ""
+	}
+	parts := strings.Split(path, "/")
+	// discussions/<goal-slug>/round-NN/...
+	if len(parts) < 4 {
+		return ""
+	}
+	if !strings.HasPrefix(parts[2], "round-") && !strings.HasPrefix(parts[2], "round_") {
+		return ""
+	}
+	return strings.Join(parts[:3], "/")
 }
 
 func (c *Coordinator) sendMessageDecisionLocked(to, content string) {

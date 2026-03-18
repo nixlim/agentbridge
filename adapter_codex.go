@@ -22,8 +22,11 @@ func (a *CodexAdapter) IsAvailable() bool {
 
 func (a *CodexAdapter) Execute(ctx context.Context, prompt string, workDir string) (*AgentResult, error) {
 	args := append([]string{}, a.config.Args...)
-	args = append(args, prompt)
-	return executeAdapterCommand(ctx, a.config, a.workspacePath, workDir, args, a.ParseOutput)
+	// Pass the prompt via stdin using "-" as the positional argument.
+	// This avoids OS command-line length limits when prompts are large
+	// (workspace file lists, dependency context, etc. can exceed ARG_MAX).
+	args = append(args, "-")
+	return executeAdapterCommandWithStdin(ctx, a.config, a.workspacePath, workDir, args, prompt, a.ParseOutput)
 }
 
 func (a *CodexAdapter) ParseOutput(raw []byte) (*AgentResult, error) {
