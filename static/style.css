@@ -1204,6 +1204,26 @@ button[type="submit"]:hover,
 .tree-entry.folder {
   color: var(--text);
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+}
+
+.tree-chevron {
+  font-size: 10px;
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 150ms ease;
+}
+
+.tree-count {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-muted);
+  margin-left: auto;
 }
 
 .tree-entry.file {
@@ -1217,7 +1237,12 @@ button[type="submit"]:hover,
 .tree-children {
   padding-left: 16px;
   border-left: 1px solid var(--border);
-  margin-left: 4px;
+  margin-left: 10px;
+  transition: max-height 200ms ease, opacity 150ms ease;
+}
+
+.tree-children.collapsed {
+  display: none;
 }
 
 /* ---- File Viewer Overlay ---- */

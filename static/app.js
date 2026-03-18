@@ -1790,29 +1790,60 @@ function buildFileTree(paths) {
   return root;
 }
 
-function renderTreeNode(node) {
+function renderTreeNode(node, depth) {
+  if (depth === undefined) depth = 0;
   const wrapper = document.createElement("div");
   wrapper.className = "tree-node";
 
   const entry = document.createElement("div");
   entry.className = `tree-entry ${node.type}`;
-  entry.textContent = node.type === "folder" ? `/${node.name}` : node.name;
   entry.title = node.path;
 
-  // Click to open file viewer for files
+  if (node.type === "folder") {
+    const chevron = document.createElement("span");
+    chevron.className = "tree-chevron";
+    chevron.textContent = "▶";
+    entry.appendChild(chevron);
+
+    const label = document.createElement("span");
+    label.textContent = node.name;
+    entry.appendChild(label);
+
+    const count = document.createElement("span");
+    count.className = "tree-count";
+    count.textContent = node.children ? node.children.length : 0;
+    entry.appendChild(count);
+  } else {
+    entry.textContent = node.name;
+  }
+
   if (node.type === "file") {
     entry.addEventListener("click", () => openFileViewer(node.path));
   }
 
   wrapper.appendChild(entry);
 
-  if (node.children && node.children.length) {
+  if (node.type === "folder" && node.children && node.children.length) {
     const children = document.createElement("div");
     children.className = "tree-children";
+    // Start collapsed for folders deeper than level 1
+    const startExpanded = depth < 1;
+    if (!startExpanded) {
+      children.classList.add("collapsed");
+      entry.querySelector(".tree-chevron").textContent = "▶";
+    } else {
+      entry.querySelector(".tree-chevron").textContent = "▼";
+    }
     node.children.forEach((child) => {
-      children.appendChild(renderTreeNode(child));
+      children.appendChild(renderTreeNode(child, depth + 1));
     });
     wrapper.appendChild(children);
+
+    entry.addEventListener("click", () => {
+      const isCollapsed = children.classList.toggle("collapsed");
+      entry.querySelector(".tree-chevron").textContent = isCollapsed ? "▶" : "▼";
+    });
+    entry.style.cursor = "pointer";
   }
 
   return wrapper;
