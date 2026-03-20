@@ -216,6 +216,14 @@ func (w *Workspace) WriteFile(relPath string, content io.Reader) (string, error)
 	return filepath.ToSlash(rel), nil
 }
 
+func (w *Workspace) DeleteFile(relPath string) error {
+	fullPath, err := w.resolvePath(relPath)
+	if err != nil {
+		return err
+	}
+	return os.Remove(fullPath)
+}
+
 func (w *Workspace) resolvePath(relPath string) (string, error) {
 	cleaned := filepath.Clean(strings.TrimSpace(relPath))
 	if cleaned == "." || cleaned == "" {

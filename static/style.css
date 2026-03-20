@@ -506,6 +506,17 @@ h1, h2, h3, p {
   background: var(--success-border);
 }
 
+.step-progress {
+  font-size: 9px;
+  font-weight: 400;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.stepper-step.active .step-progress {
+  color: var(--accent);
+}
+
 .stepper-round {
   font-size: 11px;
   color: var(--text-muted);
@@ -513,6 +524,15 @@ h1, h2, h3, p {
   padding: 3px 8px;
   border-radius: 12px;
   border: 1px solid var(--border);
+}
+
+#workflow-stepper {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 @keyframes stepperPulse {
@@ -1504,7 +1524,171 @@ button[type="submit"]:hover,
 .diff-remove { background: var(--danger-dim); color: var(--danger); }
 .diff-same { color: var(--text-muted); }
 
+/* ---- Human Input Banner ---- */
+
+.human-input-banner {
+  background: var(--warning-dim);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-lg);
+  padding: 16px 20px;
+  margin-bottom: 16px;
+  animation: bannerSlideIn 200ms ease;
+}
+
+@keyframes bannerSlideIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.human-input-banner-title {
+  color: var(--warning);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.human-input-banner-title::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning);
+  animation: dotPulse 1.5s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.human-input-banner-summary {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.human-input-questions-panel {
+  margin-top: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.human-input-questions-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px 4px;
+}
+
+.human-input-questions-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--warning);
+}
+
+.human-input-copy-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.human-input-questions-content {
+  font-family: "Inter", sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.6;
+  padding: 4px 12px 12px;
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+.human-input-banner-reply {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.human-input-banner-reply textarea {
+  background: var(--surface);
+  border-color: var(--warning-border);
+}
+
+.human-input-banner-reply textarea:focus {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.human-input-banner-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.human-input-banner-actions .topbar-select {
+  flex: 0 0 auto;
+  min-width: 140px;
+}
+
+/* ---- Message Compose ---- */
+
+.message-compose {
+  margin-top: 16px;
+}
+
+.message-compose-form {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.message-compose-target {
+  flex: 0 0 auto;
+  min-width: 140px;
+  width: auto;
+}
+
+.message-compose-form textarea {
+  flex: 1;
+  min-height: 40px;
+}
+
+.message-compose-form button {
+  flex-shrink: 0;
+}
+
+/* ---- Messages Badge (attention) ---- */
+
+.sidebar-badge-attention {
+  background: var(--warning);
+  animation: badgePulse 2s ease-in-out infinite;
+}
+
+@keyframes badgePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 /* ---- Gate Panel ---- */
+
+.gate-questions-content {
+  font-family: "Inter", sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 8px 0 0;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
 
 .card.status-gated { border-left: 3px solid var(--warning); }
 

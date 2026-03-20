@@ -97,8 +97,9 @@ type DecisionEntry struct {
 }
 
 type HumanInputRequest struct {
-	Question string `json:"question"`
-	Context  string `json:"context"`
+	Question      string `json:"question"`
+	Context       string `json:"context"`
+	QuestionsFile string `json:"questions_file,omitempty"`
 }
 
 func loadBrainSystemPrompt(cfg BrainConfig) string {

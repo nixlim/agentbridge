@@ -1,3 +1,5 @@
 agentbridge
 agentbridge.log
 workspace/
+.workspace/
+.workspace/discussions/

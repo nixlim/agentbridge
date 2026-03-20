@@ -14,6 +14,7 @@ const state = {
   activeTaskInteractionId: "",
   pendingTaskRender: false,
   goalHistoryOpen: false,
+  pendingHumanInput: null,
 };
 
 const refs = {
@@ -67,6 +68,17 @@ const refs = {
   planForm: document.getElementById("plan-form"),
   planInput: document.getElementById("plan-input"),
   humanInputPanel: document.getElementById("human-input-panel"),
+  humanInputBanner: document.getElementById("human-input-banner"),
+  humanInputSummary: document.getElementById("human-input-summary"),
+  humanInputQuestionsPanel: document.getElementById("human-input-questions-panel"),
+  humanInputQuestionsContent: document.getElementById("human-input-questions-content"),
+  humanInputReply: document.getElementById("human-input-reply"),
+  humanInputTarget: document.getElementById("human-input-target"),
+  humanInputSend: document.getElementById("human-input-send"),
+  humanInputCopy: document.getElementById("human-input-copy"),
+  messageReplyForm: document.getElementById("message-reply-form"),
+  messageReplyTarget: document.getElementById("message-reply-target"),
+  messageReplyInput: document.getElementById("message-reply-input"),
   tabTasksCount: document.getElementById("tab-tasks-count"),
   toastContainer: document.getElementById("toast-container"),
   themeToggle: document.getElementById("theme-toggle"),
@@ -243,36 +255,47 @@ function verdictBadge(verdict) {
 
 function renderWorkflowStepper() {
   refs.workflowStepper.textContent = "";
-  const recipe = state.workflow.recipe;
-  if (recipe !== "spec-review-loop" && recipe !== "spec-cross-critique-loop") return;
 
-  let stages;
-  if (recipe === "spec-cross-critique-loop") {
-    stages = ["prepare_spec", "adversarial_review", "cross_critique", "consolidation"];
-  } else {
-    stages = ["prepare_spec", "adversarial_review", "consolidation"];
-  }
+  if (!state.plan || !state.plan.phases || !state.plan.phases.length) return;
 
-  const currentStage = state.workflow.stage || "";
+  const currentPhaseNum = state.workflow.current_phase_number || 0;
 
-  const stageIdx = stages.indexOf(currentStage);
-  stages.forEach((stageKey, idx) => {
+  state.plan.phases.forEach((phase, idx) => {
     if (idx > 0) {
       const connector = document.createElement("span");
       connector.className = "stepper-connector";
-      if (stageIdx >= 0 && idx <= stageIdx) connector.classList.add("completed");
+      if (phaseStatus(phase) === "completed") connector.classList.add("completed");
       refs.workflowStepper.appendChild(connector);
     }
+
     const step = document.createElement("span");
     step.className = "stepper-step";
-    if (stageKey === currentStage) {
+    const status = phaseStatus(phase);
+    if (phase.number === currentPhaseNum && status !== "completed") {
       step.classList.add("active");
-    } else if (stageIdx >= 0 && idx < stageIdx) {
+    } else if (status === "completed") {
       step.classList.add("completed");
     }
+
     const label = document.createElement("span");
     label.className = "step-label";
-    label.textContent = stageKey.replaceAll("_", " ");
+    label.textContent = stepperLabel(phase.title);
+
+    // Task progress for active phase
+    if (phase.number === currentPhaseNum && status !== "completed") {
+      const taskCount = (phase.tasks || []).length;
+      const taskDone = (phase.tasks || []).filter((t) => {
+        const actual = state.tasks.find((st) => st.id === t.real_task_id);
+        return actual && actual.status === "completed";
+      }).length;
+      if (taskCount > 0) {
+        const progress = document.createElement("span");
+        progress.className = "step-progress";
+        progress.textContent = `${taskDone}/${taskCount}`;
+        label.appendChild(progress);
+      }
+    }
+
     step.appendChild(label);
     refs.workflowStepper.appendChild(step);
   });
@@ -286,6 +309,29 @@ function renderWorkflowStepper() {
     roundEl.textContent = maxRounds ? `Round ${round}/${maxRounds}` : `Round ${round}`;
     refs.workflowStepper.appendChild(roundEl);
   }
+}
+
+function stepperLabel(title) {
+  if (!title) return "?";
+  // Shorten common phase titles for the stepper
+  const lower = title.toLowerCase();
+  if (lower.includes("prepare") && lower.includes("spec")) return "Prepare";
+  if (lower.includes("discover")) return "Discover";
+  if (lower.includes("cross critique")) {
+    const round = title.match(/round\s*(\d+)/i);
+    return round ? `Critique R${round[1]}` : "Critique";
+  }
+  if (lower.includes("consolidate")) {
+    const round = title.match(/round\s*(\d+)/i);
+    return round ? `Consolidate R${round[1]}` : "Consolidate";
+  }
+  if (lower.includes("adversarial review")) {
+    const round = title.match(/round\s*(\d+)/i);
+    return round ? `Review R${round[1]}` : "Review";
+  }
+  if (lower.includes("amend")) return "Amend";
+  // Fallback: truncate
+  return title.length > 18 ? title.slice(0, 16) + "\u2026" : title;
 }
 
 /* ---- Goal History ---- */
@@ -580,6 +626,9 @@ function init() {
   refs.loadDiff.addEventListener("click", loadSpecDiff);
   refs.gateApprove.addEventListener("click", approveGate);
   refs.gateReject.addEventListener("click", rejectGate);
+  refs.humanInputSend.addEventListener("click", sendHumanInputReply);
+  refs.humanInputCopy.addEventListener("click", copyQuestions);
+  refs.messageReplyForm.addEventListener("submit", submitMessageReply);
 
   toggleComposerFields();
   renderHumanInputRequest();
@@ -644,6 +693,14 @@ function connectWebSocket() {
         renderGoalBar();
         renderWorkflowPanel();
         break;
+      case "human_input_requested":
+        state.pendingHumanInput = payload.data || null;
+        renderHumanInputRequest();
+        if (state.pendingHumanInput) {
+          switchToTab("messages");
+          showToast("Agent is waiting for your input", "info");
+        }
+        break;
     }
   });
 
@@ -665,6 +722,12 @@ function hydrateState(data) {
   state.workspace = data.workspace || {};
   state.messages = data.messages || [];
   state.workspaceFiles = [];
+  // Hydrate pending human input from brain state if present
+  if (data.workflow && data.workflow.pending_human_input) {
+    state.pendingHumanInput = data.workflow.pending_human_input;
+  } else {
+    state.pendingHumanInput = null;
+  }
 }
 
 function renderAll() {
@@ -758,6 +821,10 @@ function populateAgentOptions() {
 
   const label = state.workflow.recipe || state.workflow.mode || "deterministic";
   refs.brainProviderLabel.textContent = label;
+
+  // Keep message reply targets in sync
+  populateReplyTargets(refs.humanInputTarget);
+  populateReplyTargets(refs.messageReplyTarget);
 }
 
 function appendOption(select, value, label) {
@@ -835,8 +902,19 @@ function renderGoalBar() {
   if (goal.active_gate && goal.status === "gated") {
     refs.gatePanel.classList.remove("hidden");
     const gateType = goal.active_gate.type || "Human Decision Required";
-    refs.gateTitle.textContent = gateType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-    refs.gateMessage.textContent = goal.active_gate.message || "";
+    const isQuestions = gateType === "questions_pending";
+    refs.gateTitle.textContent = isQuestions ? "Agent Has Questions — Workflow Paused" : gateType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+    refs.gateMessage.textContent = "";
+    if (isQuestions && goal.active_gate.message) {
+      const pre = document.createElement("pre");
+      pre.className = "gate-questions-content";
+      pre.textContent = goal.active_gate.message;
+      refs.gateMessage.appendChild(pre);
+    } else {
+      refs.gateMessage.textContent = goal.active_gate.message || "";
+    }
+    refs.gateFeedback.placeholder = isQuestions ? "Type your answers here..." : "Optional feedback or corrections";
+    refs.gateFeedback.rows = isQuestions ? 5 : 2;
   } else {
     refs.gatePanel.classList.add("hidden");
   }
@@ -903,6 +981,112 @@ function renderWorkspace() {
 function renderHumanInputRequest() {
   refs.humanInputPanel.classList.add("hidden");
   refs.humanInputPanel.textContent = "";
+
+  const input = state.pendingHumanInput;
+  if (!input) {
+    refs.humanInputBanner.classList.add("hidden");
+    updateMessagesBadge(false);
+    return;
+  }
+
+  refs.humanInputBanner.classList.remove("hidden");
+  refs.humanInputSummary.textContent = input.question || "";
+  refs.humanInputSummary.classList.toggle("hidden", !input.question);
+
+  // Show the questions panel with the file content
+  if (input.questions_file) {
+    refs.humanInputQuestionsPanel.classList.remove("hidden");
+    refs.humanInputQuestionsContent.textContent = "Loading questions...";
+    fetch(`/api/workspace/files/${encodeURIComponent(input.questions_file)}`)
+      .then((resp) => resp.ok ? resp.text() : Promise.reject(new Error(`${resp.status}`)))
+      .then((text) => {
+        refs.humanInputQuestionsContent.textContent = text;
+      })
+      .catch(() => {
+        refs.humanInputQuestionsContent.textContent = input.context || "Could not load questions file.";
+      });
+  } else if (input.context) {
+    refs.humanInputQuestionsPanel.classList.remove("hidden");
+    refs.humanInputQuestionsContent.textContent = input.context;
+  } else {
+    refs.humanInputQuestionsPanel.classList.add("hidden");
+  }
+
+  // Populate agent target dropdown
+  populateReplyTargets(refs.humanInputTarget);
+  updateMessagesBadge(true);
+}
+
+function updateMessagesBadge(needsInput) {
+  const badge = document.getElementById("tab-messages-badge");
+  if (!badge) return;
+  if (needsInput) {
+    badge.textContent = "!";
+    badge.classList.add("sidebar-badge-attention");
+  } else {
+    badge.textContent = "";
+    badge.classList.remove("sidebar-badge-attention");
+  }
+}
+
+function populateReplyTargets(select) {
+  const current = select.value;
+  select.textContent = "";
+  appendOption(select, "", "Select agent");
+  Object.keys(state.agents).sort().forEach((name) => appendOption(select, name, name));
+  if (current && [...select.options].some((o) => o.value === current)) {
+    select.value = current;
+  }
+}
+
+function copyQuestions() {
+  const text = refs.humanInputQuestionsContent.textContent;
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    refs.humanInputCopy.textContent = "Copied";
+    window.setTimeout(() => { refs.humanInputCopy.textContent = "Copy"; }, 1500);
+  }).catch(() => {
+    showToast("Failed to copy to clipboard", "error");
+  });
+}
+
+async function sendHumanInputReply() {
+  const content = refs.humanInputReply.value.trim();
+  const target = refs.humanInputTarget.value;
+  if (!content) {
+    showToast("Please type a response.", "error");
+    return;
+  }
+  if (!target) {
+    showToast("Please select an agent to reply to.", "error");
+    return;
+  }
+  const response = await apiPost("/api/messages", { to: target, content });
+  if (response !== false) {
+    showToast("Reply sent", "success");
+    refs.humanInputReply.value = "";
+    state.pendingHumanInput = null;
+    renderHumanInputRequest();
+  }
+}
+
+async function submitMessageReply(event) {
+  event.preventDefault();
+  const content = refs.messageReplyInput.value.trim();
+  const target = refs.messageReplyTarget.value;
+  if (!content) {
+    showToast("Please type a message.", "error");
+    return;
+  }
+  if (!target) {
+    showToast("Please select an agent.", "error");
+    return;
+  }
+  const response = await apiPost("/api/messages", { to: target, content });
+  if (response !== false) {
+    showToast("Message sent", "success");
+    refs.messageReplyInput.value = "";
+  }
 }
 
 function renderWorkflowPanel() {

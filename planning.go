@@ -35,7 +35,8 @@ type WorkflowState struct {
 	StageTaskCompleted    int    `json:"stage_task_completed,omitempty"`
 	StageTaskTotal        int    `json:"stage_task_total,omitempty"`
 	SpecVersion           int    `json:"spec_version,omitempty"`
-	LastError             string `json:"last_error,omitempty"`
+	LastError             string             `json:"last_error,omitempty"`
+	PendingHumanInput     *HumanInputRequest `json:"pending_human_input,omitempty"`
 }
 
 type Phase struct {

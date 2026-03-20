@@ -37,6 +37,7 @@
         <button class="sidebar-link" data-tab="messages">
           <span class="sidebar-icon">&#x25C6;</span>
           <span class="sidebar-label">Messages</span>
+          <span id="tab-messages-badge" class="sidebar-badge"></span>
         </button>
         <button class="sidebar-link" data-tab="workspace">
           <span class="sidebar-icon">&#x229E;</span>
@@ -194,6 +195,26 @@
 
       <!-- Messages -->
       <div class="tab-panel" data-tab="messages">
+        <div id="human-input-banner" class="human-input-banner hidden">
+          <div class="human-input-banner-header">
+            <strong class="human-input-banner-title">Input Requested</strong>
+            <p id="human-input-summary" class="human-input-banner-summary"></p>
+          </div>
+          <div id="human-input-questions-panel" class="human-input-questions-panel hidden">
+            <div class="human-input-questions-header">
+              <div class="human-input-questions-label">Questions from agent</div>
+              <button id="human-input-copy" type="button" class="btn-sm human-input-copy-btn">Copy</button>
+            </div>
+            <pre id="human-input-questions-content" class="human-input-questions-content"></pre>
+          </div>
+          <div class="human-input-banner-reply">
+            <textarea id="human-input-reply" rows="3" placeholder="Type your answers or response..."></textarea>
+            <div class="human-input-banner-actions">
+              <select id="human-input-target" class="topbar-select"></select>
+              <button id="human-input-send" type="button" class="btn-primary btn-sm">Send Reply</button>
+            </div>
+          </div>
+        </div>
         <div class="section">
           <div class="section-header">
             <span class="section-title">Timeline</span>
@@ -204,6 +225,16 @@
           </div>
           <div id="message-types" class="chip-bar"></div>
           <div id="message-list" class="timeline"></div>
+        </div>
+        <div class="message-compose section">
+          <div class="section-header">
+            <span class="section-title">Reply to Agent</span>
+          </div>
+          <form id="message-reply-form" class="message-compose-form">
+            <select id="message-reply-target" class="message-compose-target"></select>
+            <textarea id="message-reply-input" rows="2" placeholder="Type a message to the agent..."></textarea>
+            <button type="submit" class="btn-primary btn-sm">Send</button>
+          </form>
         </div>
       </div>
 

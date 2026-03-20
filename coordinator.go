@@ -407,9 +407,11 @@ func (c *Coordinator) SendHumanMessage(to, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	c.brainState.PendingHumanInput = nil
+
 	task, err := c.createTaskLocked(CreateTaskRequest{
 		Title:       humanMessageTaskTitle(to, content),
-		Description: fmt.Sprintf("Respond directly to the human's message below.\n\n%s", strings.TrimSpace(content)),
+		Description: fmt.Sprintf("Respond directly to the human's message below.\n\n%s\n\nIf you have follow-up questions or need clarification from the human, write them to the workspace file: %s\nFormat as markdown with clear numbered questions. This file will be displayed to the human for their response.", strings.TrimSpace(content), questionsFilePath),
 		AssignedTo:  to,
 	})
 	if err != nil {
@@ -1242,6 +1244,8 @@ func (c *Coordinator) handleDispatchResult(dr dispatchResult) {
 				if goal := c.goals[task.GoalID]; goal != nil {
 					c.blockGoalLocked(goal, conflictContext, "goal blocked")
 				}
+			} else if c.checkAndGateForQuestionsLocked(task) {
+				// Goal gated — waiting for human answers before advancing.
 			} else if err := c.advanceGoalWorkflowLocked(); err != nil {
 				if goal := c.goals[task.GoalID]; goal != nil {
 					c.failGoalLocked(goal, fmt.Sprintf("workflow progression failed: %v", err), "goal failed")
@@ -1258,6 +1262,7 @@ func (c *Coordinator) handleDispatchResult(dr dispatchResult) {
 			reply.Metadata.DurationMs = dr.Result.DurationMs
 		}
 		c.appendMessageLocked(reply)
+		c.emitHumanInputRequestFromTaskLocked(task, summary)
 	}
 
 	if state != nil {
@@ -1704,6 +1709,83 @@ func (c *Coordinator) reassignTaskLocked(taskID, newAgent, reason string) error 
 	task.Result = firstNonEmpty(reason, task.Result)
 	c.recordTaskLocked(task, "task reassigned")
 	return nil
+}
+
+const questionsFilePath = "questions/pending.md"
+
+func (c *Coordinator) clearQuestionsFileLocked() {
+	if c.workspace == nil {
+		return
+	}
+	_ = c.workspace.DeleteFile(questionsFilePath)
+}
+
+func (c *Coordinator) writeHumanAnswersLocked(goal *Goal, answers string) {
+	if c.workspace == nil {
+		return
+	}
+	slug := c.goalSlug(goal)
+	answersPath := filepath.ToSlash(filepath.Join("questions", fmt.Sprintf("%s-answers.md", slug)))
+	_, _ = c.workspace.WriteFile(answersPath, strings.NewReader(answers))
+}
+
+func (c *Coordinator) humanAnswersInstruction(goal *Goal) string {
+	if c.workspace == nil || goal == nil {
+		return ""
+	}
+	slug := c.goalSlug(goal)
+	answersPath := filepath.ToSlash(filepath.Join("questions", fmt.Sprintf("%s-answers.md", slug)))
+	data, err := c.workspace.ReadFile(answersPath)
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("IMPORTANT: The human provided answers to earlier questions. Read and incorporate them from: %s\nThese answers take priority over assumptions.", answersPath)
+}
+
+// checkAndGateForQuestionsLocked checks if the agent wrote questions/pending.md
+// during a goal task. If questions exist, it gates the goal so the workflow pauses
+// until the human answers. Returns true if the goal was gated.
+func (c *Coordinator) checkAndGateForQuestionsLocked(task *Task) bool {
+	if c.workspace == nil || task.GoalID == "" {
+		return false
+	}
+	data, err := c.workspace.ReadFile(questionsFilePath)
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return false
+	}
+
+	goal := c.goals[task.GoalID]
+	if goal == nil {
+		return false
+	}
+
+	c.gateGoalLocked(goal, "questions_pending", string(data), 0)
+
+	c.brainState.PendingHumanInput = &HumanInputRequest{
+		Question:      fmt.Sprintf("Agent has questions after completing: %s", task.Title),
+		Context:       string(data),
+		QuestionsFile: questionsFilePath,
+	}
+	c.hub.Broadcast("human_input_requested", c.brainState.PendingHumanInput)
+	return true
+}
+
+func (c *Coordinator) emitHumanInputRequestFromTaskLocked(task *Task, summary string) {
+	// Only emit if the agent wrote a questions file to the workspace.
+	if c.workspace == nil {
+		return
+	}
+	data, err := c.workspace.ReadFile(questionsFilePath)
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return
+	}
+
+	c.brainState.PendingHumanInput = &HumanInputRequest{
+		Question:      summary,
+		Context:       string(data),
+		QuestionsFile: questionsFilePath,
+	}
+	c.hub.Broadcast("human_input_requested", c.brainState.PendingHumanInput)
 }
 
 func (c *Coordinator) requestHumanInputLocked(question, context string) {
@@ -2473,9 +2555,10 @@ func (c *Coordinator) advanceGoalWorkflowLocked() error {
 
 func (c *Coordinator) workflowStateLocked() WorkflowState {
 	state := WorkflowState{
-		Mode:   "deterministic",
-		Recipe: c.resolveGoalWorkflowRecipe(""),
-		Status: "idle",
+		Mode:              "deterministic",
+		Recipe:            c.resolveGoalWorkflowRecipe(""),
+		Status:            "idle",
+		PendingHumanInput: c.brainState.PendingHumanInput,
 	}
 
 	goal := c.currentGoalLocked()
@@ -3369,6 +3452,7 @@ func (c *Coordinator) buildSpecPreparationTaskDescription(goal *Goal, specPath s
 		"Use the technical documents and constraints in the goal details as source inputs.",
 		"Your output must leave the spec ready for adversarial review by another agent.",
 		"At the end, summarize the output path, major assumptions addressed, and any remaining open questions.",
+		fmt.Sprintf("If you have questions or ambiguities that require human input, write them as a numbered markdown list to: %s", questionsFilePath),
 		fmt.Sprintf("Goal title: %s", goal.Title),
 		"Goal details:",
 		goal.Description,
@@ -3451,7 +3535,7 @@ func (c *Coordinator) buildSpecConsolidationTaskDescription(goal *Goal, specPath
 	inputPath := specVersionPath(slug, inputVersion)
 	outputPath := specVersionPath(slug, outputVersion)
 	findingsPath := fmt.Sprintf("discussions/%s/round-%02d/merged-findings-round-%02d.json", slug, round, round)
-	return strings.TrimSpace(strings.Join([]string{
+	lines := []string{
 		fmt.Sprintf("Consolidate and amend the specification after adversarial review round %d.", round),
 		fmt.Sprintf("Use the plan-spec skill located at: %s", specPrepSkillPath()),
 		fmt.Sprintf("Read the current specification from: %s", inputPath),
@@ -3465,10 +3549,15 @@ func (c *Coordinator) buildSpecConsolidationTaskDescription(goal *Goal, specPath
 		"If you disagree with a reviewer point, record the disagreement and rationale clearly in your summary so the next round can inspect it.",
 		"If any item cannot be fully resolved from the source materials, document it explicitly in the spec and in your summary.",
 		"At the end, provide a concise issue-by-issue consolidation summary covering agree, disagree, and incorporate decisions.",
+		fmt.Sprintf("If you have questions or ambiguities that require human input to resolve, write them as a numbered markdown list to: %s", questionsFilePath),
 		fmt.Sprintf("Goal title: %s", goal.Title),
 		"Goal details:",
 		goal.Description,
-	}, "\n\n"))
+	}
+	if instruction := c.humanAnswersInstruction(goal); instruction != "" {
+		lines = append(lines, instruction)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n\n"))
 }
 
 func (c *Coordinator) buildSpecCrossCritiqueConsolidationTaskDescription(goal *Goal, specPath string, round int, reviewerCount int) string {
@@ -3478,7 +3567,7 @@ func (c *Coordinator) buildSpecCrossCritiqueConsolidationTaskDescription(goal *G
 	inputPath := specVersionPath(slug, inputVersion)
 	outputPath := specVersionPath(slug, outputVersion)
 	findingsPath := fmt.Sprintf("discussions/%s/round-%02d/merged-findings-round-%02d.json", slug, round, round)
-	return strings.TrimSpace(strings.Join([]string{
+	lines := []string{
 		fmt.Sprintf("Consolidate and amend the specification after adversarial review round %d and the reviewer cross-critiques.", round),
 		fmt.Sprintf("Use the plan-spec skill located at: %s", specPrepSkillPath()),
 		fmt.Sprintf("Read the current specification from: %s", inputPath),
@@ -3492,10 +3581,15 @@ func (c *Coordinator) buildSpecCrossCritiqueConsolidationTaskDescription(goal *G
 		"If you disagree with a reviewer or critique point, record the disagreement and rationale clearly in your summary so the next round can inspect it.",
 		"If any item cannot be fully resolved from the source materials, document it explicitly in the spec and in your summary.",
 		"At the end, provide a concise issue-by-issue consolidation summary covering agree, disagree, and incorporate decisions.",
+		fmt.Sprintf("If you have questions or ambiguities that require human input to resolve, write them as a numbered markdown list to: %s", questionsFilePath),
 		fmt.Sprintf("Goal title: %s", goal.Title),
 		"Goal details:",
 		goal.Description,
-	}, "\n\n"))
+	}
+	if instruction := c.humanAnswersInstruction(goal); instruction != "" {
+		lines = append(lines, instruction)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n\n"))
 }
 
 func (c *Coordinator) checkCircuitBreakersLocked(goal *Goal) (string, bool) {
@@ -3683,7 +3777,17 @@ func (c *Coordinator) ResolveGate(goalID string, approved bool, feedback string)
 	if approved {
 		goal.Status = GoalActive
 		goal.Summary = ""
+		c.brainState.PendingHumanInput = nil
 		c.recordGoalLocked(goal, fmt.Sprintf("gate %s approved by human", gateType))
+
+		if gateType == "questions_pending" {
+			c.clearQuestionsFileLocked()
+			// Write human answers to workspace so the next task can reference them.
+			if strings.TrimSpace(feedback) != "" {
+				c.writeHumanAnswersLocked(goal, feedback)
+			}
+		}
+
 		c.signalDispatchLocked()
 		return nil
 	}
@@ -3694,6 +3798,11 @@ func (c *Coordinator) ResolveGate(goalID string, approved bool, feedback string)
 		goal.Status = GoalBlocked
 		goal.Summary = compactGoalSummary(firstNonEmpty(feedback, "rejected by human at escalation gate"))
 		c.recordGoalLocked(goal, "escalation gate rejected by human")
+	case "questions_pending":
+		c.clearQuestionsFileLocked()
+		goal.Status = GoalBlocked
+		goal.Summary = compactGoalSummary(firstNonEmpty(feedback, "questions rejected by human — workflow stopped"))
+		c.recordGoalLocked(goal, "questions gate rejected by human")
 	default: // "discovery_review" and others
 		now := time.Now().UTC()
 		goal.Status = GoalFailed

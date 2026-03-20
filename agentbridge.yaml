@@ -24,7 +24,7 @@ providers:
   claude:
     command: "claude"
     args: ["--dangerously-skip-permissions", "--output-format", "json", "--verbose"]
-    timeout_seconds: 900
+    timeout_seconds: 1800
     max_retries: 2
     working_dir: ""
     env:
@@ -33,7 +33,7 @@ providers:
   codex:
     command: "codex"
     args: ["exec", "--full-auto"]
-    timeout_seconds: 900
+    timeout_seconds: 1800
     max_retries: 2
     working_dir: ""
     env: {}
